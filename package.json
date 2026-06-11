@@ -1,0 +1,28 @@
+{
+  "name": "veil",
+  "version": "1.0.0",
+  "description": "VEIL — a standalone, region-agnostic georeferenced 3D digital-twin engine.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "add-layer": "python3 scripts/add_layer.py",
+    "ingest-dem": "python3 scripts/ingest_dem.py",
+    "ingest-imagery": "python3 scripts/ingest_imagery.py",
+    "build-from-aoi": "python3 scripts/build_from_aoi.py",
+    "fetch-landfire": "python3 packs/us-national/fetch_landfire.py",
+    "demo": "python3 scripts/build_from_aoi.py --aoi packs/us-national/demo/flatirons_aoi.shp --data-dir twins/demo/data --name 'Flatirons demo' --force",
+    "serve-demo": "TWIN_DATA_DIR=twins/demo/data PORT=4174 node server.js",
+    "build-vegetation": "python3 scripts/analyze_vegetation.py && python3 scripts/build_surrounding_vegetation.py",
+    "build-survey-package": "python3 scripts/build_survey_package.py",
+    "migrate": "python3 scripts/migrate_to_store.py",
+    "export": "python3 scripts/export_viewer_payloads.py",
+    "rebuild-store": "python3 scripts/rebuild_store.py",
+    "canopy-history": "python3 scripts/canopy_density.py",
+    "test": "python3 scripts/twin_query_test.py"
+  },
+  "author": "Zy Mazza",
+  "license": "MIT"
+}

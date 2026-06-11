@@ -1,0 +1,5 @@
+# Python deps for the MCP server (scripts/mcp_server.py).
+# The data-pipeline scripts additionally need GDAL (osgeo) and numpy, which
+# come from the OS package manager, not pip.
+mcp>=1.20
+pyproj>=3.6

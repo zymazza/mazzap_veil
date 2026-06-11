@@ -1,0 +1,345 @@
+/* "Ask the land" chat panel: a collapsible window above the coordinate
+   readout that talks to POST /api/chat (GPT-5.5 with the twin MCP server's
+   tools). The user can scope questions three ways:
+     - the whole twin (default),
+     - a polygon region drawn on the terrain (3+ points; clearable),
+     - a single picked point, asked about with ~100 m of preloaded context.
+   Drawing and picking reuse the viewer's terrain raycast (same picking as
+   the GPS readout); while a draw/pick mode is active the click is consumed
+   in the capture phase so identify/readout don't also fire. */
+(function attachChat(global) {
+  'use strict';
+
+  const POINT_RADIUS_M = 100;
+
+  function create(viewer, scene) {
+    const { THREE } = global;
+    const canvas = viewer.renderer?.domElement;
+    const grid = viewer.terrainGrid;
+    if (!canvas || !grid) return null;
+    const georef = global.VEILGeoref.createSceneGeoref(scene.origin_utm, grid.minElevation);
+
+    const els = {
+      panel: document.getElementById('chat-panel'),
+      draw: document.getElementById('chat-draw'),
+      pick: document.getElementById('chat-pick'),
+      clear: document.getElementById('chat-clear'),
+      scope: document.getElementById('chat-scope'),
+      messages: document.getElementById('chat-messages'),
+      form: document.getElementById('chat-form'),
+      input: document.getElementById('chat-input'),
+      send: document.getElementById('chat-send'),
+    };
+    if (!els.panel) return null;
+
+    const state = {
+      mode: null,            // null | 'draw' | 'pick'
+      vertices: [],          // scene-local [x, y] (y = north)
+      point: null,           // scene-local {x, y}
+      scope: 'all',          // 'all' | 'region' | 'point'
+      history: [],           // [{role, content}]
+      busy: false,
+    };
+
+    /* ---------------- 3D overlay: markers + terrain-following outline */
+
+    const group = new THREE.Group();
+    group.renderOrder = 998;
+    viewer.scene.add(group);
+    const vertexMat = new THREE.MeshBasicMaterial({ color: 0xf2c14e });
+    const pointMat = new THREE.MeshBasicMaterial({ color: 0x4ea8de });
+    const lineMat = new THREE.LineBasicMaterial({ color: 0x6fcf97 });
+    let outline = null;
+    const markers = [];
+
+    // world y at a scene-local (x, yNorth), hugging the terrain
+    function groundY(x, yNorth) {
+      return global.VEILTerrain.sampleTerrainHeightAtLocal(grid, x, yNorth) + 1.2;
+    }
+
+    function addMarker(x, yNorth, mat, r) {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(r, 14, 10), mat);
+      m.position.set(x, groundY(x, yNorth), -yNorth);
+      m.renderOrder = 999;
+      group.add(m);
+      markers.push(m);
+      return m;
+    }
+
+    function rebuildOutline() {
+      if (outline) { group.remove(outline); outline.geometry.dispose(); outline = null; }
+      const v = state.vertices;
+      if (v.length < 2) return;
+      const ring = v.length >= 3 ? v.concat([v[0]]) : v;
+      const pts = [];
+      for (let i = 1; i < ring.length; i += 1) {
+        const [x1, y1] = ring[i - 1];
+        const [x2, y2] = ring[i];
+        const steps = Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 8));
+        for (let s = 0; s <= steps; s += 1) {
+          const x = x1 + ((x2 - x1) * s) / steps;
+          const y = y1 + ((y2 - y1) * s) / steps;
+          pts.push(new THREE.Vector3(x, groundY(x, y), -y));
+        }
+      }
+      outline = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat);
+      outline.renderOrder = 999;
+      group.add(outline);
+    }
+
+    function clearOverlay() {
+      markers.forEach((m) => { group.remove(m); m.geometry.dispose(); });
+      markers.length = 0;
+      if (outline) { group.remove(outline); outline.geometry.dispose(); outline = null; }
+    }
+
+    /* ---------------- selection state */
+
+    function polygonAreaHa(v) {
+      let a = 0;
+      for (let i = 0; i < v.length; i += 1) {
+        const [x1, y1] = v[(i + v.length - 1) % v.length];
+        const [x2, y2] = v[i];
+        a += x1 * y2 - x2 * y1;
+      }
+      return Math.abs(a) / 2 / 10000;
+    }
+
+    function setScope(scope) {
+      state.scope = scope;
+      renderScope();
+    }
+
+    function renderScope() {
+      const n = state.vertices.length;
+      if (state.mode === 'draw') {
+        els.scope.textContent = n < 3
+          ? `Drawing region — click the terrain (${n}/3 points minimum)`
+          : `Drawing region — ${n} points (${polygonAreaHa(state.vertices).toFixed(2)} ha); click "Finish region" or just ask`;
+      } else if (state.mode === 'pick') {
+        els.scope.textContent = 'Pick a point — click the terrain';
+      } else if (state.scope === 'region') {
+        els.scope.textContent =
+          `Scope: drawn region — ${n} points, ${polygonAreaHa(state.vertices).toFixed(2)} ha`;
+      } else if (state.scope === 'point') {
+        const g = georef.worldToGeo(state.point.x, 0, -state.point.y);
+        els.scope.textContent =
+          `Scope: point ${g.lat.toFixed(5)}, ${g.lon.toFixed(5)} (+${POINT_RADIUS_M} m around it)`;
+      } else {
+        els.scope.textContent = 'Scope: the whole land';
+      }
+      els.draw.textContent = state.mode === 'draw' ? 'Finish region' : 'Draw region';
+      els.draw.classList.toggle('active', state.mode === 'draw');
+      els.pick.classList.toggle('active', state.mode === 'pick');
+      els.clear.disabled = state.scope === 'all' && !state.vertices.length && !state.point;
+    }
+
+    function clearSelection(noteText) {
+      state.vertices = [];
+      state.point = null;
+      state.mode = null;
+      clearOverlay();
+      setScope('all');
+      if (noteText) note(noteText);
+    }
+
+    function startDraw() {
+      if (state.mode === 'draw') { // finish
+        state.mode = null;
+        if (state.vertices.length >= 3) {
+          setScope('region');
+          note(`Region selected (${state.vertices.length} points, ` +
+               `${polygonAreaHa(state.vertices).toFixed(2)} ha). Questions now focus on it.`);
+        } else {
+          clearSelection('A region needs at least 3 points — cleared.');
+        }
+        renderScope();
+        return;
+      }
+      // entering draw mode replaces any current selection
+      state.point = null;
+      state.vertices = [];
+      clearOverlay();
+      state.scope = 'all';
+      state.mode = 'draw';
+      renderScope();
+    }
+
+    function startPick() {
+      if (state.mode === 'pick') { state.mode = null; renderScope(); return; }
+      state.vertices = [];
+      state.point = null;
+      clearOverlay();
+      state.scope = 'all';
+      state.mode = 'pick';
+      renderScope();
+    }
+
+    /* ---------------- terrain clicks (capture phase, same raycast as readout) */
+
+    const raycaster = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+    let downAt = null;
+
+    function terrainHit(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(ndc, viewer.camera);
+      return raycaster.intersectObject(viewer.terrainMesh, false)[0] || null;
+    }
+
+    // Plain listeners; while a mode is active the readout's own pick handler
+    // stands down (it checks __twin.chat.state.mode), so clicks aren't
+    // double-handled and OrbitControls dragging keeps working.
+    canvas.addEventListener('pointerdown', (e) => {
+      if (state.mode) downAt = { x: e.clientX, y: e.clientY };
+    });
+
+    canvas.addEventListener('pointerup', (e) => {
+      if (!state.mode || !downAt) return;
+      const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
+      downAt = null;
+      if (moved >= 5) return; // it was a camera drag, not a click
+      const hit = terrainHit(e.clientX, e.clientY);
+      if (!hit) return;
+      const x = Math.round(hit.point.x * 100) / 100;
+      const y = Math.round(-hit.point.z * 100) / 100; // scene-local north
+      if (state.mode === 'draw') {
+        state.vertices.push([x, y]);
+        addMarker(x, y, vertexMat, 1.8);
+        rebuildOutline();
+        renderScope();
+      } else if (state.mode === 'pick') {
+        state.point = { x, y };
+        addMarker(x, y, pointMat, 2.4);
+        state.mode = null;
+        setScope('point');
+        const g = georef.worldToGeo(x, 0, -y);
+        note(`Point selected at ${g.lat.toFixed(6)}, ${g.lon.toFixed(6)} — ` +
+             `answers load ~${POINT_RADIUS_M} m of context around it.`);
+      }
+    });
+
+    /* ---------------- transcript */
+
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // minimal markdown: bold + bullet lines + paragraphs
+    function renderText(text) {
+      return esc(text)
+        .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+        .replace(/^[-•] (.*)$/gm, '<span class="chat-li">• $1</span>')
+        .replace(/\n/g, '<br>');
+    }
+
+    function bubble(cls, html) {
+      const div = document.createElement('div');
+      div.className = `chat-msg ${cls}`;
+      div.innerHTML = html;
+      els.messages.appendChild(div);
+      els.messages.scrollTop = els.messages.scrollHeight;
+      return div;
+    }
+
+    function note(text) {
+      bubble('note', esc(text));
+    }
+
+    function traceLine(t) {
+      const args = JSON.stringify(t.args || {});
+      bubble('trace', `⚙ ${esc(t.tool)} ${esc(args.length > 120 ? args.slice(0, 120) + '…' : args)}`);
+    }
+
+    function buildScopePayload() {
+      if (state.scope === 'region' && state.vertices.length >= 3) {
+        return { type: 'region', polygon: state.vertices };
+      }
+      if (state.scope === 'point' && state.point) {
+        return { type: 'point', point: state.point, radius_m: POINT_RADIUS_M };
+      }
+      return { type: 'all' };
+    }
+
+    async function sendMessage(text) {
+      state.history.push({ role: 'user', content: text });
+      bubble('user', renderText(text));
+      const pending = bubble('bot pending', 'Consulting the twin…');
+      state.busy = true;
+      els.send.disabled = true;
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: state.history, scope: buildScopePayload() }),
+        });
+        const data = await res.json();
+        pending.remove();
+        if (data.error) {
+          state.history.pop(); // let the user retry the same question
+          bubble('error', esc(String(data.error)));
+          return;
+        }
+        (data.trace || []).forEach(traceLine);
+        state.history.push({ role: 'assistant', content: data.reply });
+        bubble('bot', renderText(data.reply || '(empty reply)'));
+      } catch (err) {
+        pending.remove();
+        state.history.pop();
+        bubble('error', esc('Chat failed: ' + (err?.message || err)));
+      } finally {
+        state.busy = false;
+        els.send.disabled = false;
+      }
+    }
+
+    /* ---------------- wire up */
+
+    els.draw.addEventListener('click', startDraw);
+    els.pick.addEventListener('click', startPick);
+    els.clear.addEventListener('click', () => clearSelection('Selection cleared — back to the whole land.'));
+    els.form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = els.input.value.trim();
+      if (!text || state.busy) return;
+      // asking mid-draw means "use what I drew": auto-finish the region
+      // (3+ points) instead of silently falling back to whole-land scope
+      if (state.mode === 'draw') {
+        startDraw();
+      } else if (state.mode === 'pick') {
+        state.mode = null; // no point was picked; drop back to whole land
+        renderScope();
+      }
+      els.input.value = '';
+      sendMessage(text);
+    });
+    els.input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        els.form.requestSubmit();
+      }
+    });
+
+    renderScope();
+    return {
+      state,
+      clearSelection,
+      // exposed for headless tests: add a vertex / pick as if clicked
+      _addVertex(x, y) {
+        state.vertices.push([x, y]);
+        addMarker(x, y, vertexMat, 1.8);
+        rebuildOutline();
+        renderScope();
+      },
+      _setPoint(x, y) {
+        state.point = { x, y };
+        addMarker(x, y, pointMat, 2.4);
+        setScope('point');
+      },
+      _setMode(m) { state.mode = m; renderScope(); },
+      _send: sendMessage,
+    };
+  }
+
+  global.VEILChat = { create };
+})(typeof window !== 'undefined' ? window : globalThis);

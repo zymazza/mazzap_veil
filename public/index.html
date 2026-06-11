@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VEIL — digital twin</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="viewer-root"></div>
+
+  <div id="loading" class="overlay-card loading">
+    <div class="spinner"></div>
+    <p id="loading-text">Loading terrain, imagery &amp; vegetation…</p>
+  </div>
+
+  <header class="overlay-card title-card">
+    <p class="eyebrow">VEIL</p>
+    <h1 id="twin-title">Digital Twin</h1>
+    <p class="subtitle" id="twin-subtitle" hidden></p>
+  </header>
+
+  <details class="overlay-card panel controls collapsible-card" open>
+    <summary class="collapsible-header"><span class="panel-label">Controls</span></summary>
+    <div class="collapsible-body">
+      <div class="panel-group">
+        <p class="panel-label">Terrain surface</p>
+        <div class="btn-row" id="terrain-modes">
+          <button data-mode="ortho" class="active">Aerial (NAIP)</button>
+          <button data-mode="false_color">False color</button>
+          <button data-mode="hillshade">Hillshade</button>
+          <button data-mode="elevation">Elevation</button>
+        </div>
+      </div>
+
+      <div class="panel-group">
+        <p class="panel-label">Scene layers</p>
+        <div id="layer-toggles" class="toggle-list"></div>
+      </div>
+
+      <div class="panel-group">
+        <p class="panel-label">Atlas layers</p>
+        <div id="atlas-toggles" class="toggle-list atlas-toggle-list"></div>
+      </div>
+
+      <div class="panel-group" id="survey-group" hidden>
+        <p class="panel-label">Survey layers</p>
+        <div id="survey-toggles" class="toggle-list"></div>
+      </div>
+
+      <div class="panel-group">
+        <p class="panel-label">Vegetation</p>
+        <div id="veg-summary" class="veg-summary"></div>
+        <div class="btn-row" id="veg-type-filter" style="margin-top:2px">
+          <button data-vt="all" class="active">All</button>
+          <button data-vt="evergreen">Evergreen</button>
+          <button data-vt="deciduous">Deciduous</button>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="overlay-card panel atlas-panel collapsible-card" open>
+    <summary class="collapsible-header"><span class="panel-label">Map key</span></summary>
+    <div class="collapsible-body">
+      <p class="readout-hint" id="key-empty">Enable atlas layers on the left, then click the terrain to inspect features.</p>
+      <div id="key-list" class="atlas-list"></div>
+
+      <p class="panel-label" style="margin-top:14px">Feature info</p>
+      <div id="identify-results">
+        <p class="readout-hint">Click anywhere on the terrain to identify the features there.</p>
+      </div>
+    </div>
+  </details>
+
+  <div id="bottom-right-stack">
+    <details class="overlay-card chat-card collapsible-card" id="chat-panel" open>
+      <summary class="collapsible-header"><span class="panel-label">Ask the land</span></summary>
+      <div class="collapsible-body">
+        <div class="btn-row chat-btn-row">
+          <button id="chat-draw" type="button" title="Draw a polygon on the terrain (3+ points) to scope questions">Draw region</button>
+          <button id="chat-pick" type="button" title="Pick a point; questions load ~100 m of context around it">Pick point</button>
+          <button id="chat-clear" type="button" disabled>Clear</button>
+        </div>
+        <p class="chat-scope" id="chat-scope">Scope: the whole land</p>
+        <div id="chat-messages" class="chat-messages">
+          <div class="chat-msg note">Ask anything about the land — or draw a region / pick a point first to focus the question.</div>
+        </div>
+        <form id="chat-form" class="chat-form">
+          <textarea id="chat-input" rows="2" placeholder="Ask about the land…"></textarea>
+          <button id="chat-send" type="submit">Send</button>
+        </form>
+      </div>
+    </details>
+
+    <details class="overlay-card survey-card collapsible-card" id="survey-panel">
+      <summary class="collapsible-header"><span class="panel-label">Survey companion</span></summary>
+      <div class="collapsible-body">
+        <p class="readout-hint">Take the QField package to the field, then upload the zipped project folder here.</p>
+        <div class="readout-actions">
+          <a id="survey-package-link" href="/data/surveys/package/survey-package.zip" download>Download QField package ↓</a>
+        </div>
+        <form id="survey-form" class="survey-form">
+          <input id="survey-name" type="text" placeholder="Outing name (optional)" autocomplete="off" />
+          <input id="survey-file" type="file" accept=".zip,application/zip" />
+          <button id="survey-upload" type="submit">Upload survey</button>
+        </form>
+        <p id="survey-status" class="survey-status"></p>
+      </div>
+    </details>
+
+    <details class="overlay-card readout collapsible-card" id="readout" open>
+      <summary class="collapsible-header"><span class="panel-label">Coordinate readout</span></summary>
+      <div class="collapsible-body">
+        <p class="readout-hint" id="readout-hint">Click anywhere on the terrain to pin a real-world GPS coordinate.</p>
+        <dl class="readout-grid" id="readout-grid" hidden>
+          <dt>Lat, Lon</dt><dd id="r-latlon">—</dd>
+          <dt>Elevation</dt><dd id="r-elev">—</dd>
+          <dt>UTM 18N</dt><dd id="r-utm">—</dd>
+        </dl>
+        <div class="readout-actions" id="readout-actions" hidden>
+          <button id="copy-coord">Copy lat,lon</button>
+          <a id="gmaps-link" href="#" target="_blank" rel="noopener">Open in Google Maps ↗</a>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- three.js + controls + proj4 (georef.js builds its transform from it) -->
+  <script src="/vendor/three.min.js"></script>
+  <script src="/vendor/OrbitControls.js"></script>
+  <script src="/vendor/TransformControls.js"></script>
+  <script src="/vendor/proj4.js"></script>
+  <!-- ported viewer modules -->
+  <script src="/viewer/camera.js"></script>
+  <script src="/viewer/terrain.js"></script>
+  <script src="/viewer/vegetation.js"></script>
+  <script src="/viewer/overlays.js"></script>
+  <script src="/viewer/buildings3d.js"></script>
+  <script src="/viewer/building-editor.js"></script>
+  <script src="/viewer/georef.js"></script>
+  <script src="/viewer/scene.js"></script>
+  <script src="/chat.js"></script>
+  <script src="/survey.js"></script>
+  <!-- boot -->
+  <script src="/app.js"></script>
+</body>
+</html>

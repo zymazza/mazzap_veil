@@ -1,0 +1,37 @@
+# Dependencies and local runtime noise
+node_modules/
+*.log
+# OpenAI API key for the chat panel (read by server.js; never commit)
+.openai_key
+# Optional shared secret for POST /api/survey-upload (read by server.js)
+.survey_token
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# ---------------------------------------------------------------------------
+# Twin instances are PRIVATE. A twin's data holds real coordinates, parcel /
+# owner attributes, building footprints, imagery, and the store for a specific
+# place — none of it belongs in version control. The engine (scripts/, public/,
+# server.js) and regional packs (packs/) are the shareable platform; a twin's
+# ground is not. Files stay on disk and the twin keeps working; git just stops
+# tracking them. To publish the engine, this keeps every property out.
+# ---------------------------------------------------------------------------
+
+# The default twin instance and any scratch/alternate twins (TWIN_DATA_DIR).
+data/
+twins/
+**/twin_data/
+
+# Property-specific building sources (footprints, photogrammetry assets).
+buildings/
+
+# Heavy/generated asset libraries (not geospatial, just large).
+Trees_library/
+public/assets/tree-library/
+
+# A pack may carry shareable config + code but not a place's private clips;
+# ignore any data dropped inside a pack, and on-demand fetch caches.
+packs/*/data/
+packs/*/local_sources/
+packs/*/cache/
