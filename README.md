@@ -1,5 +1,11 @@
 # VEIL — a georeferenced 3D digital-twin engine
 
+
+
+https://github.com/user-attachments/assets/5f383d21-384b-4097-9977-d754a1557969
+
+
+
 VEIL turns a patch of real ground into a standalone, fully **georeferenced** 3D
 digital twin you can open in a browser, click to read true GPS coordinates, drape
 your own map layers onto the terrain, and ask questions about in natural language.
