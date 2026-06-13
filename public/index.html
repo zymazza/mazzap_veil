@@ -20,43 +20,88 @@
     <p class="subtitle" id="twin-subtitle" hidden></p>
   </header>
 
-  <details class="overlay-card panel controls collapsible-card" open>
+  <details class="overlay-card panel menu-stack collapsible-card" id="main-menu" open>
     <summary class="collapsible-header"><span class="panel-label">Controls</span></summary>
     <div class="collapsible-body">
-      <div class="panel-group">
-        <p class="panel-label">Terrain surface</p>
-        <div class="btn-row" id="terrain-modes">
-          <button data-mode="ortho" class="active">Aerial (NAIP)</button>
-          <button data-mode="false_color">False color</button>
-          <button data-mode="hillshade">Hillshade</button>
-          <button data-mode="elevation">Elevation</button>
+
+      <details class="menu-section" open>
+        <summary class="collapsible-header"><span class="panel-label">Terrain surface</span></summary>
+        <div class="collapsible-body">
+          <div class="btn-row" id="terrain-modes">
+            <button data-mode="ortho" class="active">Aerial (NAIP)</button>
+            <button data-mode="false_color">False color</button>
+            <button data-mode="hillshade">Hillshade</button>
+            <button data-mode="elevation">Elevation</button>
+          </div>
         </div>
-      </div>
+      </details>
 
-      <div class="panel-group">
-        <p class="panel-label">Scene layers</p>
-        <div id="layer-toggles" class="toggle-list"></div>
-      </div>
-
-      <div class="panel-group">
-        <p class="panel-label">Atlas layers</p>
-        <div id="atlas-toggles" class="toggle-list atlas-toggle-list"></div>
-      </div>
-
-      <div class="panel-group" id="survey-group" hidden>
-        <p class="panel-label">Survey layers</p>
-        <div id="survey-toggles" class="toggle-list"></div>
-      </div>
-
-      <div class="panel-group">
-        <p class="panel-label">Vegetation</p>
-        <div id="veg-summary" class="veg-summary"></div>
-        <div class="btn-row" id="veg-type-filter" style="margin-top:2px">
-          <button data-vt="all" class="active">All</button>
-          <button data-vt="evergreen">Evergreen</button>
-          <button data-vt="deciduous">Deciduous</button>
+      <details class="menu-section" open>
+        <summary class="collapsible-header"><span class="panel-label">Scene layers</span></summary>
+        <div class="collapsible-body">
+          <div id="layer-toggles" class="toggle-list"></div>
         </div>
-      </div>
+      </details>
+
+      <details class="menu-section" open>
+        <summary class="collapsible-header"><span class="panel-label">Atlas layers</span></summary>
+        <div class="collapsible-body">
+          <div id="atlas-toggles" class="toggle-list atlas-toggle-list"></div>
+        </div>
+      </details>
+
+      <details class="menu-section" id="survey-group" hidden>
+        <summary class="collapsible-header"><span class="panel-label">Survey layers</span></summary>
+        <div class="collapsible-body">
+          <div id="survey-toggles" class="toggle-list"></div>
+        </div>
+      </details>
+
+      <details class="menu-section" open>
+        <summary class="collapsible-header"><span class="panel-label">Vegetation</span></summary>
+        <div class="collapsible-body">
+          <div id="veg-summary" class="veg-summary"></div>
+          <div id="veg-derivation" class="veg-derivation"></div>
+          <div class="btn-row" id="veg-type-filter" style="margin-top:2px">
+            <button data-vt="all" class="active">All</button>
+            <button data-vt="evergreen">Evergreen</button>
+            <button data-vt="deciduous">Deciduous</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="menu-section" id="survey-panel">
+        <summary class="collapsible-header"><span class="panel-label">Survey companion</span></summary>
+        <div class="collapsible-body">
+          <p class="readout-hint">Take the QField package to the field, then upload the zipped project folder here.</p>
+          <div class="readout-actions">
+            <a id="survey-package-link" href="/data/surveys/package/survey-package.zip" download>Download QField package ↓</a>
+          </div>
+          <form id="survey-form" class="survey-form">
+            <input id="survey-name" type="text" placeholder="Outing name (optional)" autocomplete="off" />
+            <input id="survey-file" type="file" accept=".zip,application/zip" />
+            <button id="survey-upload" type="submit">Upload survey</button>
+          </form>
+          <p id="survey-status" class="survey-status"></p>
+        </div>
+      </details>
+
+      <details class="menu-section" id="readout" open>
+        <summary class="collapsible-header"><span class="panel-label">Coordinate readout</span></summary>
+        <div class="collapsible-body">
+          <p class="readout-hint" id="readout-hint">Click anywhere on the terrain to pin a real-world GPS coordinate.</p>
+          <dl class="readout-grid" id="readout-grid" hidden>
+            <dt>Lat, Lon</dt><dd id="r-latlon">—</dd>
+            <dt>Elevation</dt><dd id="r-elev">—</dd>
+            <dt>UTM 18N</dt><dd id="r-utm">—</dd>
+          </dl>
+          <div class="readout-actions" id="readout-actions" hidden>
+            <button id="copy-coord">Copy lat,lon</button>
+            <a id="gmaps-link" href="#" target="_blank" rel="noopener">Open in Google Maps ↗</a>
+          </div>
+        </div>
+      </details>
+
     </div>
   </details>
 
@@ -81,6 +126,8 @@
           <button id="chat-draw" type="button" title="Draw a polygon on the terrain (3+ points) to scope questions">Draw region</button>
           <button id="chat-pick" type="button" title="Pick a point; questions load ~100 m of context around it">Pick point</button>
           <button id="chat-clear" type="button" disabled>Clear</button>
+          <button id="chat-clear-drawings" type="button" title="Remove the orange polygons/markers the assistant drew on the map" disabled>Clear drawings</button>
+          <button id="chat-key" type="button" title="Set your own OpenAI API key (stored only in this browser; sent per request)">Key</button>
         </div>
         <p class="chat-scope" id="chat-scope">Scope: the whole land</p>
         <div id="chat-messages" class="chat-messages">
@@ -90,38 +137,6 @@
           <textarea id="chat-input" rows="2" placeholder="Ask about the land…"></textarea>
           <button id="chat-send" type="submit">Send</button>
         </form>
-      </div>
-    </details>
-
-    <details class="overlay-card survey-card collapsible-card" id="survey-panel">
-      <summary class="collapsible-header"><span class="panel-label">Survey companion</span></summary>
-      <div class="collapsible-body">
-        <p class="readout-hint">Take the QField package to the field, then upload the zipped project folder here.</p>
-        <div class="readout-actions">
-          <a id="survey-package-link" href="/data/surveys/package/survey-package.zip" download>Download QField package ↓</a>
-        </div>
-        <form id="survey-form" class="survey-form">
-          <input id="survey-name" type="text" placeholder="Outing name (optional)" autocomplete="off" />
-          <input id="survey-file" type="file" accept=".zip,application/zip" />
-          <button id="survey-upload" type="submit">Upload survey</button>
-        </form>
-        <p id="survey-status" class="survey-status"></p>
-      </div>
-    </details>
-
-    <details class="overlay-card readout collapsible-card" id="readout" open>
-      <summary class="collapsible-header"><span class="panel-label">Coordinate readout</span></summary>
-      <div class="collapsible-body">
-        <p class="readout-hint" id="readout-hint">Click anywhere on the terrain to pin a real-world GPS coordinate.</p>
-        <dl class="readout-grid" id="readout-grid" hidden>
-          <dt>Lat, Lon</dt><dd id="r-latlon">—</dd>
-          <dt>Elevation</dt><dd id="r-elev">—</dd>
-          <dt>UTM 18N</dt><dd id="r-utm">—</dd>
-        </dl>
-        <div class="readout-actions" id="readout-actions" hidden>
-          <button id="copy-coord">Copy lat,lon</button>
-          <a id="gmaps-link" href="#" target="_blank" rel="noopener">Open in Google Maps ↗</a>
-        </div>
       </div>
     </details>
   </div>
@@ -140,6 +155,7 @@
   <script src="/viewer/building-editor.js"></script>
   <script src="/viewer/georef.js"></script>
   <script src="/viewer/scene.js"></script>
+  <script src="/annotations.js"></script>
   <script src="/chat.js"></script>
   <script src="/survey.js"></script>
   <!-- boot -->

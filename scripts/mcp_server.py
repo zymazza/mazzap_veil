@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""MCP server over a VEIL digital-twin store — read-only, stdio transport.
+"""MCP server over a VEIL digital-twin store — stdio transport.
 
 This is the agent-facing surface of the twin: every tool is a thin wrapper
-around scripts/twin_query.py (where all logic lives and is tested). No tool
-mutates anything.
+around scripts/twin_query.py (where all logic lives and is tested). The
+store is read-only; the only writes are the draw_polygon / draw_point /
+clear_drawings tools, which maintain <data>/annotations.json — ephemeral
+orange drawings the 3D viewer polls and renders so an agent can point at
+places on the map instead of reciting coordinates. Drawings never touch
+the store or the journal.
 
 Run it:
     python3 scripts/mcp_server.py
@@ -44,10 +48,17 @@ mcp = FastMCP(
         "A georeferenced 3D digital twin of a real place: terrain, trees and "
         "shrubs, buildings, parcels, streams, roads, plus a local atlas of "
         "map layers (land cover, soils, hydrology — whatever this twin "
-        "holds). Read-only. "
+        "holds) and any field-survey uploads. The store is read-only. "
         "Call describe_twin first to learn where this twin is and what it holds. "
         "Points are {lat,lon} degrees or {x,y} scene-local meters; every result "
-        "echoes both."),
+        "echoes both. "
+        "For field observations use list_survey_layers then the survey_* kinds. "
+        "When an answer is about a place, show it on the user's live 3D map "
+        "instead of reciting coordinates: draw_polygon / draw_point put orange "
+        "shapes on it, and set_layer_visibility / filter_layer turn the twin's "
+        "own atlas layers on and reveal just the regions that matter (e.g. only "
+        "the GAP cells where a species occurs, or one soil class). "
+        "reset_layer_views hands layer control back to the user."),
 )
 
 _tq = None
@@ -207,6 +218,99 @@ def canopy_change(region: dict | None = None,
     member selects the population: member_parcel (default), member_surrounding
     (the terrain apron outside the parcel), or any."""
     return _run(_query().canopy_change, region=region, member=member)
+
+
+@mcp.tool()
+def list_survey_layers() -> dict:
+    """The field-survey catalog (Survey companion, docs/survey.md): one entry
+    per uploaded QField layer (trails, stream_centerlines, photo_points,
+    observations) with its store kind `survey_<layer>`, geometry type, live
+    feature count, attribute fields, and whether photos are attached. The
+    survey_* kinds are first-class entities: query them with find_entities,
+    summarize_region, aggregate_entities, get_entity and identify_at. Returns
+    an empty list (with a note) when no survey has been uploaded yet."""
+    return _run(_query().list_survey_layers)
+
+
+@mcp.tool()
+def draw_polygon(polygon: list, label: str | None = None) -> dict:
+    """Draw an orange polygon on the user's live 3D map — use this whenever
+    an answer points at an area (a stand, a wet corner, a recommended site)
+    instead of listing coordinates in text. polygon: at least 3 [lon,lat] or
+    scene-local [x,y] vertex pairs (auto-detected; ring auto-closed). label:
+    short name shown on the map (e.g. "Densest evergreen stand"). Drawings
+    are presentation-only annotations — they appear immediately, persist
+    until cleared, and never modify the twin. The user can remove them with
+    the viewer's "Clear drawings" button."""
+    return _run(_query().draw_polygon, polygon, label=label)
+
+
+@mcp.tool()
+def draw_point(point: dict, label: str | None = None) -> dict:
+    """Drop an orange marker on the user's live 3D map — use this whenever
+    an answer points at a spot (a specific tree, the highest point, where to
+    dig) instead of listing coordinates in text. point: {"lat","lon"} degrees
+    or {"x","y"} scene-local meters. label: short name shown on the map.
+    Presentation-only — appears immediately, persists until cleared, never
+    modifies the twin. The user can remove drawings with the viewer's
+    "Clear drawings" button."""
+    return _run(_query().draw_point, point, label=label)
+
+
+@mcp.tool()
+def clear_drawings() -> dict:
+    """Remove every drawn polygon and point marker from the user's 3D map.
+    Call it when the user asks, or before drawing a fresh set for a new
+    question so stale shapes don't pile up. Layer-view overrides
+    (set_layer_visibility / filter_layer) are left untouched — clear those
+    with reset_layer_views."""
+    return _run(_query().clear_drawings)
+
+
+@mcp.tool()
+def set_layer_visibility(layer_id: str, visible: bool = True) -> dict:
+    """Show or hide one of the twin's atlas map layers on the user's live 3D
+    terrain — use this to bring up the layer your answer is about (land cover,
+    soils, geology, hydrology, GAP species richness — whatever this twin holds)
+    instead of describing it in text. layer_id: a drape-able atlas layer (the
+    valid ids are listed by list_layers and echoed in any error). The layer is
+    draped onto the terrain so it conforms to topography. visible=False hides
+    it again. The override persists until you change it or call
+    reset_layer_views."""
+    return _run(_query().set_layer_visibility, layer_id, visible=visible)
+
+
+@mcp.tool()
+def filter_layer(layer_id: str, values: list,
+                 field: str | None = None) -> dict:
+    """Reveal ONLY the selected regions of an atlas layer (and turn the layer
+    on) — the precise way to point at "where X is". Everything else in the
+    layer is hidden until you clear the filter (call set_layer_visibility, or
+    reset_layer_views). Use it for questions like "where could I find wild
+    turkey": filter the GAP species-richness layer to that species and the map
+    lights up only its modeled habitat.
+
+    layer_id: a drape-able atlas layer. values: the regions to reveal —
+      * raster categorical layers (e.g. LANDFIRE land cover): legend class
+        names, from layer_summary(layer_id).classes[].name.
+      * the GAP species-richness layer: species common-names (field defaults to
+        "species"), from layer_summary(...).filterable_species or identify_at.
+      * vector layers: the distinct values of `field` (defaults to the feature
+        label) — see layer_summary(layer_id).labels / .attribute_fields.
+    field: which attribute to match on (vectors only; ignored otherwise).
+    Matching is case-insensitive; the result reports matched_values and any
+    unmatched ones so you can correct a name. Combine with draw_polygon /
+    draw_point when a single spot also helps."""
+    return _run(_query().filter_layer, layer_id, values, field=field)
+
+
+@mcp.tool()
+def reset_layer_views() -> dict:
+    """Undo every layer override you made with set_layer_visibility /
+    filter_layer, handing the twin's layer toggles back to the user. Drawn
+    polygons and points are left in place (clear those with clear_drawings).
+    Call it when switching topics so stale layer state doesn't linger."""
+    return _run(_query().reset_layer_views)
 
 
 if __name__ == "__main__":

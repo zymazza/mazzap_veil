@@ -1,5 +1,15 @@
-# Python deps for the MCP server (scripts/mcp_server.py).
-# The data-pipeline scripts additionally need GDAL (osgeo) and numpy, which
-# come from the OS package manager, not pip.
-mcp>=1.20
-pyproj>=3.6
+# Pure-Python deps for the pipeline + MCP/chat server, pip-installable on any
+# platform:
+#   mcp     — the MCP server (scripts/mcp_server.py) and chat bridge
+#   pyproj  — in-Python WGS84 <-> projected-CRS transforms
+#   Pillow  — raster layer rendering (atlas PNGs, survey package basemap)
+#
+# GDAL (the `osgeo` bindings) and numpy are NOT installed by pip here: GDAL's
+# Python bindings must match the system GDAL, and the scripts use GDAL's array
+# support (ReadAsArray/WriteArray), which is tied to a matching numpy. Get them
+# from the OS package manager, or just use the container (Dockerfile /
+# docker-compose.yml), whose OSGeo base image ships GDAL + bindings + numpy
+# pinned together by GDAL_VERSION.
+mcp>=1.20,<2
+pyproj>=3.6,<4
+Pillow>=10,<12

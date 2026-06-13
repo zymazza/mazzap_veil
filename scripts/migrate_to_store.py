@@ -96,7 +96,7 @@ def register_input_files(store):
         ("imagery_hillshade_surrounding", "imagery/hillshade_surrounding.png",
          "imagery", "Hillshade (surrounding)"),
         ("lidar_tree_seed", "vegetation/tree_instances.lidar.json", "lidar_seed",
-         "Pristine LiDAR stem population (committed immutable input)"),
+         "Pristine LiDAR stem population (immutable seed input)"),
         ("building_clearance_hulls", "buildings/models/clearance.json", "derived",
          "Building plan outlines for vegetation clearance"),
     ]:

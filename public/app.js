@@ -29,6 +29,9 @@
     drape: null,            // {mesh, canvas, ctx, texture, bounds}
     speciesGrids: null,
     surroundingVegetation: null,
+    layerFilters: new Map(),  // id -> {field, values} (MCP filter_layer)
+    agentLayers: new Set(),   // ids the MCP server currently drives
+    toggleInputs: new Map(),  // id -> checkbox, so agent views move the UI
   };
 
   // every drape-able / identify-able vector+raster layer (atlas + survey)
@@ -122,6 +125,8 @@
     setupLayerToggles(viewer);
     setupVegetation(viewer);
     setupPicking(viewer, scene);
+    window.__twin.applyLayerViews = applyLayerViews;
+    window.__twin.annotations = window.VEILAnnotations?.create(viewer, scene);
     window.__twin.chat = window.VEILChat?.create(viewer, scene);
     window.__twin.survey = window.VEILSurvey?.create(refreshSurveyLayers);
     renderKey();
@@ -162,14 +167,74 @@
     host.replaceChildren();
     group.hidden = !state.survey.layers.length;
     state.survey.layers.forEach((layer) => {
-      host.appendChild(makeToggleRow(layer.label, layer.stroke || '#ccc',
+      const row = makeToggleRow(layer.label, layer.stroke || '#ccc',
         state.enabled.get(layer.id), async (on) => {
           state.enabled.set(layer.id, on);
           if (on) await ensureLayerData(layer);
           redrawDrape();
           renderKey();
-        }));
+        });
+      state.toggleInputs.set(layer.id, row.querySelector('input'));
+      host.appendChild(row);
     });
+  }
+
+  // How the twin's stems were derived — the capability ladder, in plain
+  // language, so NDVI/nominal-height stems are never read as ground truth.
+  // (Mirrors scripts/analyze_vegetation.py's stem_capability labels.)
+  const VEG_CAPABILITY = {
+    lidar_segmentation: {
+      confidence: 'high', label: 'LiDAR-segmented stems',
+      detail: 'individual stems with measured heights from LiDAR.',
+    },
+    dsm_dtm_chm: {
+      confidence: 'medium', label: 'Canopy-height-model stems',
+      detail: 'stems and heights from a DSM−DTM canopy height model — ' +
+        'positions and heights are estimates, not surveyed.',
+    },
+    ndvi_local_maxima: {
+      confidence: 'low', label: 'NDVI canopy maxima',
+      detail: 'stem positions from an NDVI canopy mask only; heights are ' +
+        'nominal, not measured. Treat counts and heights as rough estimates.',
+    },
+    none: {
+      confidence: 'none', label: 'No stems detected',
+      detail: 'no LiDAR, canopy-height model, or NDVI signal was available.',
+    },
+  };
+  const VEG_CONFIDENCE_LABEL = {
+    high: 'High confidence', medium: 'Medium confidence',
+    low: 'Low confidence', none: 'Unavailable',
+  };
+
+  function vegetationDerivationHtml(meta) {
+    const cap = VEG_CAPABILITY[meta.stem_capability];
+    if (!cap) return '';
+    const conf = VEG_CONFIDENCE_LABEL[cap.confidence] || '';
+    const parts = [
+      `<div class="veg-derivation-row">` +
+        `<span class="veg-confidence veg-confidence-${cap.confidence}">${conf}</span>` +
+        `<span class="veg-derivation-method">${cap.label}</span></div>`,
+      `<div class="veg-note">${cap.detail}</div>`,
+    ];
+    const fill = Number(meta.canopy_fill_count) || 0;
+    if (fill > 0) {
+      const detected = Number(meta.detected_tree_count) || 0;
+      parts.push(
+        `<div class="veg-note">${detected.toLocaleString()} detected · ` +
+        `${fill.toLocaleString()} synthetic canopy-fill (planted to match the ` +
+        `imagery canopy, not individually detected).</div>`);
+    }
+    // What the typing/species step could not do, in its own words.
+    const cm = meta.classification_method || '';
+    if (/unavailable/i.test(cm)) {
+      // classification_method reads "<reason> — type unavailable"; surface the reason.
+      const reason = cm.split('—')[0].trim() || 'type knowledge missing';
+      parts.push(`<div class="veg-note veg-unavailable">Evergreen/deciduous unavailable (${reason}).</div>`);
+    } else if (cm) {
+      parts.push(`<div class="veg-note">Evergreen/deciduous via ${cm}.</div>`);
+    }
+    return parts.join('');
   }
 
   async function setupVegetation(viewer) {
@@ -179,11 +244,13 @@
     } catch (_e) { return; }
     const top = (meta.communities || [])[0];
     const community = top ? top.name.replace(/ Forest.*/, '') : '';
+    const canopy = meta.canopy_cover_pct != null ? `${meta.canopy_cover_pct}% canopy` : '';
     document.getElementById('veg-summary').innerHTML =
       `<div class="veg-stat"><span class="veg-dot" style="background:#1f4030"></span>` +
       `${meta.evergreen_pct}% evergreen &nbsp;` +
       `<span class="veg-dot" style="background:#6a8f3f"></span>${meta.deciduous_pct}% deciduous</div>` +
-      `<div class="veg-note">${meta.canopy_cover_pct}% canopy · ${community}</div>`;
+      `<div class="veg-note">${[canopy, community].filter(Boolean).join(' · ')}</div>`;
+    document.getElementById('veg-derivation').innerHTML = vegetationDerivationHtml(meta);
 
     const filter = document.getElementById('veg-type-filter');
     filter.addEventListener('click', (e) => {
@@ -369,6 +436,77 @@
     else if (geometry.type === 'MultiPoint') geometry.coordinates.forEach(cb);
   }
 
+  // --- MCP layer filters: keep only the features/cells the agent selected ---
+
+  function featureMatchesFilter(f, filter) {
+    const field = filter.field || '__label';
+    const v = (f.properties || {})[field];
+    if (v === undefined || v === null) return false;
+    const have = String(v).toLowerCase();
+    return filter.values.some((w) => String(w).toLowerCase() === have);
+  }
+
+  // Re-draw a categorical raster from its value grid, painting only the cells
+  // whose legend class the agent picked (matched by name or numeric value).
+  function drawFilteredRaster(ctx, layer, data, filter) {
+    const grid = data.grid;
+    if (!grid || !grid.values) return; // no value grid -> nothing to filter on
+    const want = new Set(filter.values.map((s) => String(s).toLowerCase()));
+    const legend = grid.legend || {};
+    const keep = new Map(); // value -> [r,g,b]
+    Object.entries(legend).forEach(([val, meta]) => {
+      const name = String((meta && meta.name) || '').toLowerCase();
+      if (want.has(name) || want.has(String(val).toLowerCase())) {
+        keep.set(Number(val), (meta && meta.color) || [255, 140, 26]);
+      }
+    });
+    if (!keep.size) return;
+    const [minx, miny, maxx, maxy] = layer.bounds_local;
+    const [x0, y0] = toCanvas(minx, maxy);
+    const [x1, y1] = toCanvas(maxx, miny);
+    const cw = (x1 - x0) / grid.width;
+    const ch = (y1 - y0) / grid.height;
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    for (let r = 0; r < grid.height; r += 1) {
+      const row = grid.values[r] || [];
+      for (let c = 0; c < grid.width; c += 1) {
+        const col = keep.get(row[c]);
+        if (!col) continue;
+        ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+        ctx.fillRect(x0 + c * cw, y0 + r * ch, cw + 0.6, ch + 0.6);
+      }
+    }
+    ctx.restore();
+  }
+
+  // Paint an orange habitat mask: cells where any selected GAP species has
+  // modeled habitat (the per-species bitmask grids loaded at boot).
+  function drawSpeciesMask(ctx, filter) {
+    const sg = state.speciesGrids;
+    if (!sg || !sg.species) return false;
+    const want = new Set(filter.values.map((s) => String(s).toLowerCase()));
+    const picked = Object.values(sg.species)
+      .filter((s) => want.has(String(s.common_name).toLowerCase()));
+    if (!picked.length) return false;
+    const [minx, miny, maxx, maxy] = sg.bounds_local;
+    const [x0, y0] = toCanvas(minx, maxy);
+    const [x1, y1] = toCanvas(maxx, miny);
+    const cw = (x1 - x0) / sg.width;
+    const ch = (y1 - y0) / sg.height;
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = '#ff8c1a';
+    for (let r = 0; r < sg.height; r += 1) {
+      for (let c = 0; c < sg.width; c += 1) {
+        const present = picked.some((s) => s.rows[r] && s.rows[r][c] === '1');
+        if (present) ctx.fillRect(x0 + c * cw, y0 + r * ch, cw + 0.6, ch + 0.6);
+      }
+    }
+    ctx.restore();
+    return true;
+  }
+
   function redrawDrape() {
     const d = state.drape;
     if (!d) return;
@@ -381,7 +519,13 @@
     layers.forEach((layer) => {
       const data = state.layerData.get(layer.id);
       const ctx = d.ctx;
+      const filter = state.layerFilters.get(layer.id);
       if (layer.type === 'raster') {
+        // A species filter on the GAP grid paints a habitat mask; any other
+        // filter re-renders the value grid keeping only the chosen classes;
+        // unfiltered, the pre-colored ortho image drapes as before.
+        if (filter && filter.field === 'species' && drawSpeciesMask(ctx, filter)) return;
+        if (filter) { drawFilteredRaster(ctx, layer, data, filter); return; }
         const [minx, miny, maxx, maxy] = layer.bounds_local;
         const [x0, y0] = toCanvas(minx, maxy);
         const [x1, y1] = toCanvas(maxx, miny);
@@ -396,6 +540,7 @@
       // feature with its own stable per-label color.
       const perFeature = !!layer.categorical;
       (data.features || []).forEach((f) => {
+        if (filter && !featureMatchesFilter(f, filter)) return;
         const label = f.properties?.__label;
         if (layer.type === 'polygon') {
           eachPolygon(f.geometry, (rings) => {
@@ -483,16 +628,64 @@
     const atlasHost = document.getElementById('atlas-toggles');
     state.atlas.layers.forEach((layer) => {
       const swatch = layer.type === 'raster' ? '#888' : (layer.stroke || '#ccc');
-      atlasHost.appendChild(makeToggleRow(layer.label, swatch, state.enabled.get(layer.id),
+      const row = makeToggleRow(layer.label, swatch, state.enabled.get(layer.id),
         async (on) => {
           state.enabled.set(layer.id, on);
+          // a manual toggle takes the layer back from the agent (and drops any
+          // agent filter on it); the next MCP directive can reclaim it.
+          state.agentLayers.delete(layer.id);
+          state.layerFilters.delete(layer.id);
           if (on) await ensureLayerData(layer);
           redrawDrape();
           renderKey();
-        }));
+        });
+      state.toggleInputs.set(layer.id, row.querySelector('input'));
+      atlasHost.appendChild(row);
     });
 
     buildSurveyToggles();
+  }
+
+  /* ---- MCP layer-view overrides (set_layer_visibility / filter_layer) ----
+     annotations.js polls data/annotations.json and hands us its layer_views
+     array whenever the file changes; we move the matching toggles and drape
+     filters to match. Edge-triggered like the drawings: between directive
+     changes the user's manual toggles win. */
+  const layerById = (id) => allLayers().find((l) => l.id === id);
+
+  function setToggleChecked(id, checked) {
+    const el = state.toggleInputs.get(id);
+    if (el) el.checked = checked;
+  }
+
+  async function applyOneLayerView(v) {
+    const layer = layerById(v.layer_id);
+    if (!layer) return; // unknown layer id — ignore quietly
+    state.agentLayers.add(v.layer_id);
+    const visible = v.visible !== false;
+    state.enabled.set(v.layer_id, visible);
+    setToggleChecked(v.layer_id, visible);
+    if (v.filter && Array.isArray(v.filter.values) && v.filter.values.length) {
+      state.layerFilters.set(v.layer_id, v.filter);
+    } else {
+      state.layerFilters.delete(v.layer_id);
+    }
+    if (visible) await ensureLayerData(layer);
+  }
+
+  async function applyLayerViews(views) {
+    const list = Array.isArray(views) ? views : [];
+    const wanted = new Set(list.map((v) => v.layer_id));
+    // release any layer the agent drove before but no longer mentions
+    [...state.agentLayers].forEach((id) => {
+      if (wanted.has(id)) return;
+      state.agentLayers.delete(id);
+      state.layerFilters.delete(id);
+      if (layerById(id)) { state.enabled.set(id, false); setToggleChecked(id, false); }
+    });
+    await Promise.all(list.map(applyOneLayerView));
+    redrawDrape();
+    renderKey();
   }
 
   /* ---------------- map key + click-to-identify ---------------- */
@@ -506,9 +699,13 @@
       const item = document.createElement('div');
       item.className = 'atlas-item';
       const sw = layer.type === 'raster' ? '#888' : (layer.stroke || '#ccc');
+      const filter = state.layerFilters.get(layer.id);
+      const feat = filter
+        ? `only ${filter.values.slice(0, 3).join(', ')}${filter.values.length > 3 ? '…' : ''}`
+        : (layer.type === 'raster' ? 'raster' : `${layer.feature_count} feat`);
       item.innerHTML =
         `<span><span class="swatch" style="background:${sw};display:inline-block;margin-right:7px"></span>${layer.label}</span>` +
-        `<span class="feat">${layer.type === 'raster' ? 'raster' : layer.feature_count + ' feat'}</span>`;
+        `<span class="feat">${feat}</span>`;
       host.appendChild(item);
     });
   }

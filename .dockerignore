@@ -1,0 +1,39 @@
+# Keep the build context to engine code + bundled pack + committed demo AOI.
+# Mirrors .gitignore: private twins, heavy asset libraries, and local runtime
+# noise never enter the image (twin data is mounted at runtime instead).
+.git
+.gitignore
+node_modules
+demo-video
+
+# Private twin instances and building sources (gitignored; mounted at runtime).
+# Anchored with a leading slash so they match only at the repo root — an
+# unanchored `data` would also drop tests/fixtures/mini-twin/data, the committed
+# fixture twin we DO want baked into the image (so `npm test` runs in-container).
+/data
+/twins
+/buildings
+**/twin_data
+packs/*/data
+packs/*/local_sources
+packs/*/cache
+
+# Heavy/generated asset libraries.
+/Trees_library
+public/assets/tree-library
+
+# Secrets and local noise.
+.openai_key
+.survey_token
+*.log
+.DS_Store
+__pycache__
+**/__pycache__
+*.py[cod]
+
+# Container/meta files that don't belong inside the image.
+Dockerfile
+.dockerignore
+docker-compose.yml
+.devcontainer
+HYDROLOGY-RESEARCH.md

@@ -28,9 +28,43 @@ const HOST = process.env.HOST || '127.0.0.1';
 // OpenAI's function calling. Still zero npm dependencies (built-in fetch +
 // child_process).
 
+// Provider: 'openai' (hosted Responses API, default) or 'ollama' (a local model
+// over Ollama's OpenAI-compatible /v1/chat/completions). CHAT_PROVIDER picks it;
+// if unset but OLLAMA_MODEL is given, we infer 'ollama'. Ollama needs no key and
+// nothing leaves the machine.
+const CHAT_PROVIDER = (process.env.CHAT_PROVIDER
+  || (process.env.OLLAMA_MODEL ? 'ollama' : 'openai')).toLowerCase();
+
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
 const OPENAI_REASONING = process.env.OPENAI_REASONING_EFFORT || 'low';
-const MAX_TOOL_ROUNDS = 8;
+// When set, the server never spends its own key: every /api/chat request must
+// carry the caller's key (X-OpenAI-Key). Use this for any public deployment so
+// strangers reaching the port bring their own quota, not yours.
+const OPENAI_REQUIRE_USER_KEY = process.env.OPENAI_REQUIRE_USER_KEY === '1';
+
+const OLLAMA_HOST = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gpt-oss:20b';
+// Context window for the local model. gpt-oss:20b uses sliding-window attention,
+// so its KV cache is remarkably cheap (~27 MiB per 1k tokens): 13 GB of weights
+// + KV + graph is ~15 GB at 32k and only ~17 GB at the full 131072 — context is
+// nearly free on VRAM. We default to 96k so a maxed-out tool session (up to
+// OLLAMA_MAX_TOOL_ROUNDS rounds, each with a TOOL_RESULT_CAP-sized result) never
+// truncates; this fits ~16 GB / 100% GPU on a free 24 GB card. Set to 131072 for
+// the model's max if you want; the limit is GPU memory, not the model.
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 98304;
+// Sampling temperature for the local model. gpt-oss defaults to 1.0, which makes
+// agentic tool-calling unreliable — it intermittently emits truncated/malformed
+// tool-call JSON or a turn with no answer. 0 makes tool use deterministic and
+// dependable; raise only if you want more varied prose.
+const OLLAMA_TEMPERATURE = process.env.OLLAMA_TEMPERATURE !== undefined
+  ? Number(process.env.OLLAMA_TEMPERATURE) : 0;
+
+// The active chat model label (shown in the panel / echoed in responses).
+const CHAT_MODEL = CHAT_PROVIDER === 'ollama' ? OLLAMA_MODEL : OPENAI_MODEL;
+const MAX_TOOL_ROUNDS = 8; // OpenAI batches calls per round, so 8 is plenty
+// Local reasoning models (gpt-oss) emit ONE tool call per turn after thinking,
+// so they need many more rounds to work through a multi-step question.
+const MAX_TOOL_ROUNDS_OLLAMA = Number(process.env.OLLAMA_MAX_TOOL_ROUNDS) || 16;
 const TOOL_RESULT_CAP = 24000; // chars per tool result sent to the model
 
 function openaiKey() {
@@ -158,26 +192,60 @@ function cap(text, n = TOOL_RESULT_CAP) {
 const CHAT_SYSTEM_PROMPT = [
   'You are the resident guide of a VEIL digital twin — a georeferenced 3D model of',
   'a real place with terrain, vegetation, buildings, soils, hydrology, land cover',
-  'and habitat data. Call describe_twin first to learn where this twin is and what',
-  'it contains. Answer questions about the land using the read-only twin tools.',
-  'Coordinates: tools accept {lat,lon} degrees or scene-local meters {x,y}; results',
-  'echo both. Distances and heights are meters.',
-  'Ground every figure in tool results and keep answers conversational and compact',
-  '(the chat panel is small) — lead with the answer, then the key numbers; mention',
-  'data sources (LiDAR, gSSURGO, LANDFIRE, GAP…) briefly when relevant.',
-  'Use small limit values on find_entities; prefer aggregate_entities and',
-  'summarize_region for counts and statistics.',
-].join(' ');
+  'and habitat data. You answer questions about THIS land using the read-only twin',
+  'tools, and you show places on the user\'s live 3D map.',
+  '',
+  'GROUNDING',
+  '- Call describe_twin first to learn where the twin is and what it contains.',
+  '- Every figure must come from a tool result — never invent or estimate numbers.',
+  '  Keep each number\'s real unit (count, m, m², ha, acres, %); do not relabel a',
+  '  percentage as an area or reuse one figure for unrelated things. If a tool did',
+  '  not give you something, say so plainly instead of guessing.',
+  '- Prefer aggregate_entities and summarize_region for counts and statistics; use',
+  '  small limit values on find_entities. Coordinates: tools take {lat,lon} degrees',
+  '  or scene-local meters {x,y} (results echo both); distances and heights are m.',
+  '',
+  'SHOW PLACES ON THE MAP — this is a hard rule, not optional:',
+  '- Whenever your answer points at one or more specific places, you MUST call',
+  '  draw_point (a spot) for EACH place, with a short label. Prefer draw_point — it',
+  '  is reliable. The map drawing IS the deliverable.',
+  '- Use REAL coordinates from a tool result (an entity\'s `position` or a feature\'s',
+  '  centroid) — never invented numbers. When a place is a relevant feature (water,',
+  '  an edge, a road), anchor the marker to that feature\'s coordinates.',
+  '- Never write "I\'ll draw…", "I\'ll mark…", "let me plot…" or similar. Drawing is',
+  '  a tool call you actually make, not a sentence you say. If you mentioned a place',
+  '  but did not call a draw tool for it, you are not done.',
+  '- Draw 2-3 places at most, each at a DIFFERENT location, each exactly once. Never',
+  '  draw the same coordinate twice. Do NOT call clear_drawings (the user clears the',
+  '  map) and do not redraw or second-guess a marker you already placed.',
+  '- Don\'t recite raw coordinates in prose — the marker shows the location. Just',
+  '  name what you drew, then give your final written answer.',
+  '',
+  'BE EFFICIENT — you have a limited number of tool turns:',
+  '- Gather only the data you actually need, then commit to an answer. Do not repeat',
+  '  a query you already ran or keep re-checking the same thing.',
+  '- The normal arc is: a few read calls → one draw call per place → your final',
+  '  written reply. End with the reply; don\'t keep calling tools after you can answer.',
+  '',
+  'ANSWER STYLE — the chat panel is small and renders ONLY **bold**, "- " bullet',
+  'lines, and short paragraphs:',
+  '- Do NOT use markdown tables, headings (#), or code blocks — they show up as raw',
+  '  symbols. Use a one- or two-sentence lead answer, then at most a few "- "',
+  '  bullets for the key facts, with **bold** on the essentials.',
+  '- Be concise and conversational. Do not narrate your tool calls or add a "how I',
+  '  got the numbers" / methodology section. Name a data source (LiDAR, gSSURGO,',
+  '  LANDFIRE, GAP…) only in a few words when it genuinely matters.',
+].join('\n');
 
 // GPT-5.5 function calling lives on the Responses API (chat/completions
 // rejects tools+reasoning for it). Tool rounds chain via previous_response_id
 // so reasoning state carries across calls.
-async function openaiResponses(payload) {
+async function openaiResponses(payload, apiKey) {
   const res = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${openaiKey()}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(payload),
   });
@@ -188,15 +256,171 @@ async function openaiResponses(payload) {
   return res.json();
 }
 
+// Ollama's native /api/chat speaks the same tool/function-calling schema and,
+// unlike its OpenAI-compatible endpoint, honors options.num_ctx — which we need
+// to size the context window so the model fits the GPU. No auth, no network
+// egress (the local daemon). Tool rounds carry state by replaying the growing
+// message list (there is no previous_response_id here).
+async function ollamaChat(payload) {
+  let res;
+  try {
+    res = await fetch(`${OLLAMA_HOST}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    throw new Error(`cannot reach Ollama at ${OLLAMA_HOST} — is "ollama serve" running? (${err.message || err})`);
+  }
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Ollama ${res.status}: ${detail.slice(0, 400)}`);
+  }
+  return res.json();
+}
+
+// --- provider runners: each takes the shared {history, toolDefs, instructions}
+// and drives the tool loop in its provider's dialect, returning {reply, trace}.
+
+async function runOpenAI({ history, toolDefs, instructions, apiKey }) {
+  const tools = toolDefs.map((t) => ({
+    type: 'function', name: t.name, description: t.description, parameters: t.parameters,
+  }));
+  const trace = [];
+  let reply = null;
+  let previousId = null;
+  let input = history;
+  for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+    const data = await openaiResponses({
+      model: OPENAI_MODEL,
+      reasoning: { effort: OPENAI_REASONING },
+      instructions,
+      tools,
+      input,
+      ...(previousId ? { previous_response_id: previousId } : {}),
+    }, apiKey);
+    previousId = data.id;
+    const calls = (data.output || []).filter((o) => o.type === 'function_call');
+    if (!calls.length) {
+      reply = (data.output || [])
+        .filter((o) => o.type === 'message')
+        .flatMap((o) => o.content || [])
+        .filter((c) => c.type === 'output_text')
+        .map((c) => c.text)
+        .join('\n');
+      break;
+    }
+    input = [];
+    for (const call of calls) {
+      let args = {};
+      try { args = JSON.parse(call.arguments || '{}'); } catch (_err) { /* ignore */ }
+      trace.push({ tool: call.name, args });
+      let result;
+      try {
+        result = await mcpCall(call.name, args);
+      } catch (err) {
+        result = JSON.stringify({ error: String(err.message || err) });
+      }
+      input.push({ type: 'function_call_output', call_id: call.call_id, output: cap(result) });
+    }
+  }
+  if (reply === null) reply = '(stopped after too many tool calls — try a narrower question)';
+  return { reply, trace };
+}
+
+async function runOllama({ history, toolDefs, instructions }) {
+  const tools = toolDefs.map((t) => ({
+    type: 'function',
+    function: { name: t.name, description: t.description, parameters: t.parameters },
+  }));
+  const messages = [{ role: 'system', content: instructions }, ...history];
+  const trace = [];
+  let reply = null;
+  let lastContent = ''; // gpt-oss often writes its answer in a turn that ALSO calls a tool
+  let nudges = 0;        // bounded recoveries from malformed/empty turns
+  for (let round = 0; round <= MAX_TOOL_ROUNDS_OLLAMA; round += 1) {
+    let data;
+    try {
+      data = await ollamaChat({
+        model: OLLAMA_MODEL,
+        messages,
+        tools,
+        stream: false,
+        options: { num_ctx: OLLAMA_NUM_CTX, temperature: OLLAMA_TEMPERATURE },
+      });
+    } catch (err) {
+      // gpt-oss intermittently emits invalid tool-call JSON; Ollama 500s on it.
+      // Resampling at temp 0 just repeats the bad output, so instead feed back a
+      // correction — that changes the context and breaks the deterministic path.
+      if (/parsing tool call/i.test(String(err.message || err)) && nudges < 3) {
+        nudges += 1;
+        messages.push({ role: 'user', content: 'Your last tool call was not valid JSON. '
+          + 'Re-issue it with complete, valid arguments — plain numbers for lat/lon or x/y and a short string label. '
+          + 'If you already have what you need, stop calling tools and write your final answer now.' });
+        if (process.env.OLLAMA_DEBUG) console.error(`[r${round}] tool-call parse error -> nudge ${nudges}`);
+        continue;
+      }
+      throw err;
+    }
+    const msg = data.message || {};
+    const calls = msg.tool_calls || [];
+    if (msg.content && msg.content.trim()) lastContent = msg.content;
+    if (process.env.OLLAMA_DEBUG) console.error(`[r${round}] done=${data.done_reason} content=${(msg.content||'').length} thinking=${(msg.thinking||'').length} calls=${calls.length} [${calls.map((c)=>c.function&&c.function.name).join(',')}]`);
+    if (!calls.length) {
+      // A turn with no tool call should carry the final answer. gpt-oss sometimes
+      // ends with an empty "final" channel — nudge it once to actually write it.
+      if ((msg.content && msg.content.trim()) || lastContent.trim() || nudges >= 3) {
+        reply = msg.content || '';
+        break;
+      }
+      nudges += 1;
+      messages.push({ role: 'user', content: 'Now write your final answer for the user, following the answer-style rules.' });
+      if (process.env.OLLAMA_DEBUG) console.error(`[r${round}] empty final -> nudge ${nudges}`);
+      continue;
+    }
+    // Echo the assistant's tool-call turn, then answer each call with a tool msg.
+    messages.push({ role: 'assistant', content: msg.content || '', tool_calls: calls });
+    for (const call of calls) {
+      const fn = call.function || {};
+      let args = {};
+      try { args = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments || '{}') : (fn.arguments || {}); }
+      catch (_err) { /* ignore */ }
+      trace.push({ tool: fn.name, args });
+      let result;
+      try {
+        result = await mcpCall(fn.name, args);
+      } catch (err) {
+        result = JSON.stringify({ error: String(err.message || err) });
+      }
+      messages.push({ role: 'tool', tool_call_id: call.id, content: cap(result) });
+    }
+  }
+  // Recover the answer the model wrote alongside a tool call, or before it ran
+  // out of rounds mid-drawing, rather than returning a blank bubble.
+  if (reply === null) reply = '';
+  if (!reply.trim()) reply = lastContent;
+  if (!reply.trim()) reply = '(stopped before answering — try a narrower question)';
+  return { reply, trace };
+}
+
 async function handleChat(req, res) {
   let body = '';
   req.on('data', (chunk) => { body += chunk; });
   req.on('end', async () => {
     try {
-      if (!openaiKey()) {
-        return send(res, 500, JSON.stringify({
-          error: 'no OpenAI key: set OPENAI_API_KEY or create .openai_key in the project root',
-        }), { 'Content-Type': 'application/json' });
+      // OpenAI needs a key (BYOK header wins, else server key); Ollama is local
+      // and keyless.
+      let apiKey = null;
+      if (CHAT_PROVIDER === 'openai') {
+        const userKey = String(req.headers['x-openai-key'] || '').trim();
+        apiKey = userKey || (OPENAI_REQUIRE_USER_KEY ? null : openaiKey());
+        if (!apiKey) {
+          return send(res, 400, JSON.stringify({
+            error: OPENAI_REQUIRE_USER_KEY
+              ? 'This twin requires your own OpenAI key — click "Key" in the chat panel to add one.'
+              : 'No OpenAI key: click "Key" in the chat panel to add yours, or set OPENAI_API_KEY / .openai_key on the server.',
+          }), { 'Content-Type': 'application/json' });
+        }
       }
       const { messages = [], scope = { type: 'all' } } = JSON.parse(body || '{}');
       const history = messages
@@ -209,54 +433,16 @@ async function handleChat(req, res) {
       }
 
       const client = await mcpReady();
-      const tools = client.tools.map((t) => ({
-        type: 'function',
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema,
+      const toolDefs = client.tools.map((t) => ({
+        name: t.name, description: t.description, parameters: t.inputSchema,
       }));
       const instructions = `${CHAT_SYSTEM_PROMPT}\n\n${await scopeContext(scope)}`;
 
-      const trace = [];
-      let reply = null;
-      let previousId = null;
-      let input = history;
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-        const data = await openaiResponses({
-          model: OPENAI_MODEL,
-          reasoning: { effort: OPENAI_REASONING },
-          instructions,
-          tools,
-          input,
-          ...(previousId ? { previous_response_id: previousId } : {}),
-        });
-        previousId = data.id;
-        const calls = (data.output || []).filter((o) => o.type === 'function_call');
-        if (!calls.length) {
-          reply = (data.output || [])
-            .filter((o) => o.type === 'message')
-            .flatMap((o) => o.content || [])
-            .filter((c) => c.type === 'output_text')
-            .map((c) => c.text)
-            .join('\n');
-          break;
-        }
-        input = [];
-        for (const call of calls) {
-          let args = {};
-          try { args = JSON.parse(call.arguments || '{}'); } catch (_err) { /* ignore */ }
-          trace.push({ tool: call.name, args });
-          let result;
-          try {
-            result = await mcpCall(call.name, args);
-          } catch (err) {
-            result = JSON.stringify({ error: String(err.message || err) });
-          }
-          input.push({ type: 'function_call_output', call_id: call.call_id, output: cap(result) });
-        }
-      }
-      if (reply === null) reply = '(stopped after too many tool calls — try a narrower question)';
-      send(res, 200, JSON.stringify({ reply, trace, model: OPENAI_MODEL }),
+      const { reply, trace } = CHAT_PROVIDER === 'ollama'
+        ? await runOllama({ history, toolDefs, instructions })
+        : await runOpenAI({ history, toolDefs, instructions, apiKey });
+
+      send(res, 200, JSON.stringify({ reply, trace, model: CHAT_MODEL, provider: CHAT_PROVIDER }),
         { 'Content-Type': 'application/json' });
     } catch (err) {
       console.error('chat error:', err);
@@ -264,6 +450,16 @@ async function handleChat(req, res) {
         { 'Content-Type': 'application/json' });
     }
   });
+}
+
+// Lets the viewer tailor the chat UI to the active provider (e.g. hide the
+// OpenAI "Key" button when running on a local model).
+function handleChatConfig(res) {
+  send(res, 200, JSON.stringify({
+    provider: CHAT_PROVIDER,
+    model: CHAT_MODEL,
+    needs_key: CHAT_PROVIDER === 'openai',
+  }), { 'Content-Type': 'application/json' });
 }
 
 const MIME = {
@@ -426,6 +622,28 @@ function saveBuildingPlacements(req, res) {
   });
 }
 
+// Empty out the LLM map drawings (data/annotations.json — written by the
+// MCP server's draw_polygon/draw_point tools, polled and rendered orange by
+// public/annotations.js). The viewer's "Clear drawings" button posts here;
+// writing an empty document (rather than unlinking) keeps the file's shape
+// stable for whichever MCP process writes next. Layer-view overrides in the
+// same file (set_layer_visibility/filter_layer) are cleared too, so the one
+// button also hides any atlas layers the agent revealed — the client's
+// follow-up poll applies the now-empty layer_views and resets the drape.
+function clearAnnotations(res) {
+  const annPath = path.join(DATA_DIR, 'annotations.json');
+  try {
+    fs.writeFileSync(annPath, JSON.stringify({
+      version: 1, updated_at: new Date().toISOString(),
+      annotations: [], layer_views: [],
+    }, null, 1));
+    send(res, 200, JSON.stringify({ ok: true }), { 'Content-Type': 'application/json' });
+  } catch (err) {
+    send(res, 500, JSON.stringify({ ok: false, error: err.message }),
+      { 'Content-Type': 'application/json' });
+  }
+}
+
 const server = http.createServer((req, res) => {
   let pathname;
   let requestUrl;
@@ -444,8 +662,16 @@ const server = http.createServer((req, res) => {
     return handleSurveyUpload(req, res, requestUrl.searchParams);
   }
 
+  if (req.method === 'GET' && pathname === '/api/chat/config') {
+    return handleChatConfig(res);
+  }
+
   if (req.method === 'POST' && pathname === '/api/chat') {
     return handleChat(req, res);
+  }
+
+  if (req.method === 'POST' && pathname === '/api/annotations/clear') {
+    return clearAnnotations(res);
   }
 
   if (pathname === '/') pathname = '/index.html';

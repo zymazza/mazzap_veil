@@ -1,0 +1,28 @@
+{
+  "name": "VEIL",
+  "comment": "Dev container: the same image as the Dockerfile (Node + GDAL + numpy + pyproj + Pillow + mcp, all pinned). The repo is mounted over the image, so you edit live; the pinned toolchain comes from the image.",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/veil",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/veil,type=bind",
+  "forwardPorts": [4173],
+  "portsAttributes": {
+    "4173": { "label": "VEIL viewer", "onAutoForward": "notify" }
+  },
+  "remoteEnv": {
+    "HOST": "0.0.0.0",
+    "PORT": "4173",
+    "TWIN_DATA_DIR": "${containerWorkspaceFolder}/data"
+  },
+  "postCreateCommand": "node --version && python3 -c \"from osgeo import gdal; import numpy, pyproj, PIL; print('GDAL', gdal.__version__, '| numpy', numpy.__version__, '| pyproj', pyproj.__version__)\"",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

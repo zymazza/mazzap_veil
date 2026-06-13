@@ -1,8 +1,15 @@
 # MCP server over the twin store
 
 `scripts/mcp_server.py` exposes the twin store (`data/twin.gpkg`) to LLM
-agents over MCP (stdio). It is **read-only**: every tool queries, none
-mutate. All logic lives in `scripts/twin_query.py` (tested by
+agents over MCP (stdio). The store is **read-only**: no tool mutates it.
+The one writable surface is the viewer-directive set — the map-drawing trio
+(`draw_polygon` / `draw_point` / `clear_drawings`) plus the layer-view trio
+(`set_layer_visibility` / `filter_layer` / `reset_layer_views`), which
+together maintain `<data>/annotations.json` — ephemeral orange shapes and
+atlas-layer overrides the 3D viewer polls and applies so an agent can point
+at places (and reveal the exact map layer/region) instead of reciting
+coordinates (see "Drawing on the map" below). All logic lives in
+`scripts/twin_query.py` (tested by
 `scripts/twin_query_test.py` against the real store); the MCP layer is thin
 wrappers.
 
@@ -65,13 +72,72 @@ python3 scripts/twin_query_test.py
 | `find_entities(kind, near?, within_m?, region?, attr_filters?, limit?)` | "Trees over 20 m within 50 m of this building" |
 | `get_entity(entity_id)` | Full current state + geometry of one entity |
 | `entity_history(entity_id, attr?)` | One entity's observation timeline across runs |
-| `identify_at(point)` | Everything true at a point (the viewer's click-to-identify) — atlas layers only; survey features (`survey_*` kinds, docs/survey.md) are reachable via `find_entities`/`summarize_region` but not point-identify yet |
+| `identify_at(point)` | Everything true at a point (the viewer's click-to-identify) — atlas layers, GAP species habitat, containing parcel/building, **and** survey features (`survey_*`, photo + status) |
 | `sample_raster(layer_id, point)` | One raster value + legend name at a point |
 | `list_layers(kind?)` | The atlas/input catalog with acquisition provenance |
 | `layer_summary(layer_id)` | Fields/labels of a vector; legend + class shares of a raster |
 | `summarize_region(region)` | "What's happening inside this shape?" — the headline call |
 | `aggregate_entities(kind, metric, group_by?, where?, region?)` | Counts, mean height, crown area, splits |
 | `canopy_change(region?, member?)` | "When did canopy density change here?" — per-run history |
+| `list_survey_layers()` | The field-survey catalog (`survey_*` kinds, counts, fields, photos) |
+| `draw_polygon(polygon, label?)` | Draw a labeled orange polygon on the user's live 3D map |
+| `draw_point(point, label?)` | Drop a labeled orange marker on the user's live 3D map |
+| `clear_drawings()` | Remove every drawn shape from the map |
+| `set_layer_visibility(layer_id, visible?)` | Show/hide one atlas map layer on the user's terrain |
+| `filter_layer(layer_id, values, field?)` | Reveal ONLY the selected regions of a layer (turns it on) |
+| `reset_layer_views()` | Drop every agent layer override (user toggles back in control) |
+
+## Drawing on the map
+
+When an answer points at a place — "the densest stand is here", "put the
+trail along this line of parcels", "the wettest corner is this one" — the
+agent should **draw it** with `draw_polygon` / `draw_point` (vertices in
+`[lon,lat]` or scene-local `[x,y]`, auto-detected like region polygons; a
+short `label` shows on the map) rather than listing coordinates in text.
+
+Mechanics: the tools append to `<data>/annotations.json` (scene-local
+meters, atomic rewrite) and the viewer (`public/annotations.js`) polls that
+file every few seconds, rendering terrain-hugging orange outlines, orange
+point markers, and label sprites. This works identically for the built-in
+chat panel and for any external MCP client pointed at the same twin — the
+viewer doesn't care who wrote the file. Drawings are presentation-only:
+they never enter the store or the journal, and they persist until cleared.
+The user clears them with the chat panel's **Clear drawings** button
+(`POST /api/annotations/clear`); the agent can also call `clear_drawings`,
+e.g. before drawing a fresh set for a new question.
+
+## Controlling map layers
+
+Beyond drawing its own shapes, the agent can drive the twin's *own* atlas
+layers. `set_layer_visibility(layer_id, visible)` toggles a layer's drape on
+the terrain — bring up the layer the answer is about (land cover, soils,
+geology, hydrology, GAP species richness — whatever the twin holds) instead
+of describing it. `filter_layer(layer_id, values, field?)` goes further: it
+turns the layer on but reveals **only** the selected regions, hiding the
+rest. The `values` are:
+
+- **raster categorical layers** (e.g. LANDFIRE land cover): legend class
+  names from `layer_summary(layer_id).classes[].name` — the drape re-renders
+  from the value grid keeping only those classes, in their legend colors;
+- **the GAP species-richness grid**: species common-names (default
+  `field="species"`) from `layer_summary(...).filterable_species` or
+  `identify_at` — the viewer paints an orange habitat mask over the cells
+  where any chosen species has modeled habitat. *"Where could I find wild
+  turkey?"* → `filter_layer("gap_species_richness", ["Wild Turkey"])` and the
+  map lights up exactly that range;
+- **vector layers**: the distinct values of `field` (default the feature
+  label `__label`) from `layer_summary(layer_id).labels` / `.attribute_fields`.
+
+Matching is case-insensitive; the result reports `matched_values` and any
+`unmatched_values` so the agent can correct a name. Mechanics mirror the
+drawings: directives are written into the same `<data>/annotations.json`
+(under `layer_views`), polled by `public/annotations.js`, and applied by
+`public/app.js` (which owns the drape) — moving the layer toggles and drape
+filters to match. They are **edge-triggered**: between directive changes the
+user's own manual toggles win, and a manual toggle reclaims a layer from the
+agent. `reset_layer_views` drops every override (the **Clear drawings**
+button leaves layer views untouched — they have their own reset). Layer
+control, like drawings, never touches the store or the journal.
 
 ## Example session
 
@@ -107,6 +173,24 @@ Natural-language questions and the tool calls they become:
    catalog with acquisition provenance, extent and CRS — the right first
    calls in any session.
 
+6. **"What did the field survey find here?"**
+   `list_survey_layers()` → the uploaded layers and their `survey_*` kinds,
+   then `find_entities(kind="survey_observations", region={…})` or
+   `identify_at(point=…)` for the features (with photos) at a spot.
+
+## Survey companion
+
+Field uploads (QField, docs/survey.md) land as `survey_*` store entities and
+were already queryable via `find_entities` / `summarize_region` /
+`aggregate_entities`. Two additions complete the exposure:
+
+- `list_survey_layers()` is the discovery call — the uploaded layers, their
+  store kinds, geometry types, feature counts, attribute fields, and whether
+  photos are attached. Empty (with a note) until something is uploaded.
+- `identify_at(point)` now includes survey features (polygons by containment,
+  lines and points within 8 m), with each feature's photo and status — the
+  click-to-identify gap is closed.
+
 ## The viewer chat panel
 
 The viewer ships an "Ask the land" panel (above the coordinate readout) that
@@ -127,12 +211,16 @@ Three question scopes:
   100 m as pre-loaded context.
 
 The transcript shows each tool call the model made (⚙ lines), so every
-answer is auditable against the store.
+answer is auditable against the store. When the model draws on the map
+mid-answer (draw_polygon / draw_point), the shapes appear in orange as soon
+as the reply lands; **Clear drawings** removes them.
 
 ## Phase boundaries
 
-No write tools, no sensors/actuators, no HTTP transport, no auth — later
-phases. The Node viewer server (`server.js`) is untouched and the viewer
-needs none of this; the MCP server reads `data/twin.gpkg` (plus the atlas
-files under `data/atlas/local/` and terrain grids) directly via
-`scripts/twin_store.py`.
+No store-mutating tools (drawings and layer views touch only
+`annotations.json`), no
+sensors/actuators, no HTTP transport, no auth — later phases. The MCP
+server reads `data/twin.gpkg` (plus the atlas files under
+`data/atlas/local/` and terrain grids) directly via `scripts/twin_store.py`;
+the Node viewer server is involved only in serving/clearing the annotations
+file for the browser.

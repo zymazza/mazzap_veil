@@ -6,13 +6,15 @@ entity kind, written as standard gpkg feature tables) and the plain relational
 tables (meta, pipeline_runs, entities, observations, layers). All build
 scripts go through this module; nothing else opens the gpkg directly.
 
-Durability: the gpkg itself is a gitignored materialized index. The canonical
-history is the write journal in data/journal/ (committed): every Store write
-session flushes its ops to one append-only NNNNNN-<script>.jsonl.gz file on
-close, and scripts/rebuild_store.py reconstructs the gpkg — same runs, same
-timestamps, same observation order — by replaying those files. If a process
-dies mid-session its journal file is never written, so on crash the gpkg can
-be ahead of the journal; `rebuild_store.py` restores the journaled truth.
+Durability: the gpkg itself is a materialized index. The canonical history is
+the write journal in data/journal/ — append-only at the file level: every Store
+write session flushes its ops to one NNNNNN-<script>.jsonl.gz file on close, and
+scripts/rebuild_store.py reconstructs the gpkg — same runs, same timestamps,
+same observation order — by replaying those files. If a process dies mid-session
+its journal file is never written, so on crash the gpkg can be ahead of the
+journal; `rebuild_store.py` restores the journaled truth. Both the journal and
+the gpkg live inside the twin's data dir and are private/gitignored along with
+it (the repo ships only code + packs); they are never committed to this repo.
 
 Conventions (do not introduce a second one):
   * Coordinates are scene-local meters (x = east, y = north), i.e. EPSG:26918

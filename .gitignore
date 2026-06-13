@@ -23,6 +23,13 @@ data/
 twins/
 **/twin_data/
 
+# Exception: the committed offline test fixture is the one twin that IS shared —
+# it is synthetic (no real ground, no private attributes), built by
+# scripts/build_test_fixture.py, so `npm test` runs offline in CI with no
+# national-data fetch. Re-include it despite the data/ rule above.
+!tests/fixtures/mini-twin/data/
+!tests/fixtures/mini-twin/data/**
+
 # Property-specific building sources (footprints, photogrammetry assets).
 buildings/
 

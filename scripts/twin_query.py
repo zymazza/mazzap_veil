@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Read-only query layer over the twin store, for the MCP server.
+"""Query layer over the twin store, for the MCP server.
 
 Everything the MCP tools answer is computed here, so the logic is testable
 without the MCP runtime (scripts/twin_query_test.py runs it against the real
 data/twin.gpkg). Store access goes through scripts/twin_store.py (the Store's
 sqlite connection is reused for the read-only SQL the store API doesn't
 cover, the same way scripts/canopy_density.py queries it).
+
+The store is strictly read-only here. The one thing this module writes is
+<data>/annotations.json — ephemeral map drawings (draw_polygon / draw_point /
+clear_drawings) that the viewer polls and renders in orange so an LLM can
+point at places instead of dictating coordinates. Annotations never touch
+the store or the journal.
 
 Conventions (the documented ones — no second convention):
   * Store/scene coordinates are scene-local meters: x = east, y = north,
@@ -44,6 +50,10 @@ VIEWER_LAYERS = os.path.join(ATLAS_LOCAL, "viewer-layers.json")
 AOI_GEOJSON = os.path.join(DATA, "terrain", "aoi_local.geojson")
 TERRAIN_GRID = os.path.join(DATA, "terrain", "grid.json")
 APRON_GRID = os.path.join(DATA, "terrain", "grid.apron.json")
+ANNOTATIONS_PATH = os.path.join(DATA, "annotations.json")
+# Survey companion (docs/survey.md): the viewer catalog of uploaded field
+# layers + the scene-local GeoJSON each references.
+SURVEY_CATALOG = os.path.join(DATA, "surveys", "survey-layers.json")
 
 # Pad (degrees) added around the twin's extent to form the geographic window
 # used to auto-detect lon/lat polygon vertices. Scene-local meters never look
@@ -68,6 +78,11 @@ HIDE_PROPS = {"__label", "OBJECTID", "Shape_Length", "Shape_Area",
               "SPATIALVER", "GlobalID"}
 
 LINE_HIT_DISTANCE_M = 8.0  # app.js identify: line features hit within 8 m
+
+# The richness raster the GAP per-species habitat bitmasks attach to; filtering
+# it by species renders a habitat mask instead of the richness gradient.
+GAP_SPECIES_LAYER = "gap_species_richness"
+DRAPE_TYPES = ("raster", "polygon", "line", "point")
 
 
 class TwinQueryError(Exception):
@@ -423,6 +438,77 @@ def resolve_region(region, georef):
     return _rings_region("polygon", [pts], f"polygon with {len(pts) - 1} vertices ({coords})")
 
 
+# --------------------------------------------------- map drawings (viewer)
+# LLM-drawn polygons/points the viewer renders in orange. They live in one
+# flat JSON file inside the twin's data dir (so the static server serves it
+# and any process pointed at the same twin shares it) — never in the store.
+# Scene-local meters only, matching every other viewer payload.
+
+ANNOTATION_LABEL_MAX = 80
+
+
+def _utc_now():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _load_view_doc():
+    """The viewer-directive document: drawings the agent placed (`annotations`)
+    and layer-view overrides it set (`layer_views`). One file the viewer polls;
+    both lists are returned so a write to one never drops the other."""
+    try:
+        with open(ANNOTATIONS_PATH) as fh:
+            doc = json.load(fh)
+        if not isinstance(doc, dict):
+            doc = {}
+    except (OSError, ValueError):
+        doc = {}
+    anns = doc.get("annotations")
+    views = doc.get("layer_views")
+    return (anns if isinstance(anns, list) else [],
+            views if isinstance(views, list) else [])
+
+
+def _save_view_doc(annotations, layer_views):
+    doc = {"version": 1, "updated_at": _utc_now(),
+           "annotations": annotations, "layer_views": layer_views}
+    tmp = ANNOTATIONS_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(doc, fh, indent=1)
+    os.replace(tmp, ANNOTATIONS_PATH)
+
+
+def _load_annotations():
+    return _load_view_doc()[0]
+
+
+def _next_annotation_id(annotations):
+    high = 0
+    for a in annotations:
+        m = re.fullmatch(r"drawing:(\d+)", str(a.get("id", "")))
+        if m:
+            high = max(high, int(m.group(1)))
+    return f"drawing:{high + 1:04d}"
+
+
+def _clean_label(label):
+    if label is None:
+        return None
+    label = str(label).strip()
+    return label[:ANNOTATION_LABEL_MAX] or None
+
+
+_DRAWN_NOTE = ("now visible on the user's 3D map in orange; refer to it by its "
+               "label/color instead of reciting coordinates. The user can remove "
+               "drawings with the viewer's \"Clear drawings\" button, or call "
+               "clear_drawings.")
+
+_LAYER_NOTE = ("The drape conforms to the terrain so the user sees exactly "
+               "which ground it covers. Overrides take effect within a few "
+               "seconds and persist until you change them; call "
+               "reset_layer_views to hand layer control back to the user.")
+
+
 # -------------------------------------------------------------- the store
 
 class TwinQuery:
@@ -655,6 +741,29 @@ class TwinQuery:
         return {k: layer.get(k) for k in
                 ("layer_id", "label", "acquisition", "service", "source_path", "fetched_at")
                 if layer.get(k) is not None}
+
+    # -- survey companion (docs/survey.md) ------------------------------------
+
+    def _survey_catalog(self):
+        """The survey-layers.json catalog (one entry per uploaded survey
+        layer), or [] when nothing has been surveyed yet."""
+        def build():
+            try:
+                with open(SURVEY_CATALOG) as fh:
+                    return json.load(fh).get("layers", [])
+            except (OSError, ValueError):
+                return []
+        return self._cache("survey_catalog", build)
+
+    def _survey_features(self, layer):
+        """The scene-local GeoJSON features for one survey layer."""
+        def build():
+            try:
+                with open(os.path.join(DATA, layer["file"])) as fh:
+                    return json.load(fh).get("features", [])
+            except (OSError, ValueError):
+                return []
+        return self._cache(("survey_features", layer["id"]), build)
 
     # -- attr filters ---------------------------------------------------------
 
@@ -938,6 +1047,8 @@ class TwinQuery:
                         "entity_id": eid, "kind": kind,
                         "attrs": self._attrs_with_provenance(kind, eid)})
 
+        survey = self._survey_hits(x, y)
+
         elevation = None
         for grid in self._terrain_grids():
             elevation = sample_terrain_elevation(grid, x, y)
@@ -949,8 +1060,42 @@ class TwinQuery:
             "elevation_m": round(elevation, 2) if elevation is not None else None,
             "atlas": results,
             "species_habitat": species,
+            "survey": survey,
             "entities_here": containing,
         }
+
+    def _survey_hits(self, x, y):
+        """Survey-companion features at a point (docs/survey.md): polygons by
+        containment, lines within 8 m, points within 8 m — the click-to-identify
+        coverage atlas layers get, now extended to field uploads (photo and
+        status included). [] when nothing has been surveyed here."""
+        hits = []
+        for layer in self._survey_catalog():
+            for f in self._survey_features(layer):
+                g = f.get("geometry") or {}
+                gtype = g.get("type", "")
+                if gtype.endswith("Polygon"):
+                    hit = point_in_rings(polygon_rings(g), x, y)
+                elif "Line" in gtype:
+                    hit = dist_to_paths(line_paths(g), x, y) < LINE_HIT_DISTANCE_M
+                elif gtype in ("Point", "MultiPoint"):
+                    coords = [g["coordinates"]] if gtype == "Point" else g["coordinates"]
+                    hit = any(math.hypot(c[0] - x, c[1] - y) < LINE_HIT_DISTANCE_M
+                              for c in coords)
+                else:
+                    hit = False
+                if hit:
+                    props = {k: v for k, v in (f.get("properties") or {}).items()
+                             if k not in HIDE_PROPS and v not in (None, "", " ")}
+                    hits.append({
+                        "kind": layer["id"], "layer_label": layer.get("label"),
+                        "name": (f.get("properties") or {}).get("__label")
+                        or layer.get("label"),
+                        "properties": props,
+                        "provenance": {"acquisition": layer.get("acquisition",
+                                                                 "qfield_survey")},
+                    })
+        return hits
 
     def sample_raster(self, layer_id, point):
         """One raster layer's value + legend entry at a point."""
@@ -1037,6 +1182,14 @@ class TwinQuery:
                                    "northeast": self.georef.echo(b[2], b[3])},
                 "classes": classes,
             })
+            # the GAP richness grid carries per-species habitat masks: list the
+            # species so the agent knows what filter_layer(..., field="species")
+            # can reveal.
+            sg = self._species_grids() if layer_id == GAP_SPECIES_LAYER else None
+            if sg:
+                out["filterable_species"] = sorted(
+                    {s.get("common_name") for s in sg["species"].values()
+                     if s.get("common_name")})
         else:
             features = data.get("features", [])
             geom_types = {}
@@ -1438,6 +1591,254 @@ class TwinQuery:
                          "over observations, joined to pipeline_runs "
                          "(same query shape as scripts/canopy_density.py)"},
         }
+
+    # -- survey companion query surface (docs/survey.md) ----------------------
+
+    def list_survey_layers(self):
+        """The field-survey catalog: one entry per uploaded QField layer
+        (trails, stream_centerlines, photo_points, observations), each with
+        its store kind (survey_<layer> — queryable via find_entities /
+        summarize_region / aggregate_entities / identify_at), geometry type,
+        live feature count, the attribute fields present, and whether any
+        feature carries a photo. Empty list (with a note) when no survey has
+        been uploaded yet."""
+        layers = []
+        for layer in self._survey_catalog():
+            feats = self._survey_features(layer)
+            fields = sorted({k for f in feats
+                             for k in (f.get("properties") or {})
+                             if k not in HIDE_PROPS and k != "__label"})
+            layers.append({
+                "kind": layer["id"],
+                "label": layer.get("label"),
+                "geometry_type": layer.get("type"),
+                "feature_count": layer.get("feature_count", len(feats)),
+                "fields": fields,
+                "has_photos": any((f.get("properties") or {}).get("photo")
+                                  for f in feats),
+                "acquisition": layer.get("acquisition", "qfield_survey"),
+            })
+        out = {"count": len(layers), "layers": layers}
+        if not layers:
+            out["note"] = ("no field surveys uploaded yet — the Survey companion "
+                           "write path (docs/survey.md) is empty for this twin")
+        return out
+
+    # -- map drawings (viewer annotations) -----------------------------------
+
+    def _within_extent(self, xs, ys):
+        try:
+            minx, miny, maxx, maxy = self._extent()
+        except Exception:
+            return None
+        return all(minx <= x <= maxx and miny <= y <= maxy
+                   for x, y in zip(xs, ys))
+
+    def draw_polygon(self, polygon, label=None):
+        if (not isinstance(polygon, (list, tuple)) or len(polygon) < 3
+                or not all(isinstance(p, (list, tuple)) and len(p) >= 2 for p in polygon)):
+            raise TwinQueryError(
+                "polygon must be a list of at least 3 [lon,lat] or [x,y] vertex pairs",
+                got=polygon)
+        try:
+            pts = [(float(p[0]), float(p[1])) for p in polygon]
+        except (TypeError, ValueError):
+            raise TwinQueryError("polygon vertices must be numbers", got=polygon)
+        geographic = _looks_geographic(pts, self.georef)
+        if geographic:
+            pts = [self.georef.to_scene(lon, lat) for lon, lat in pts]
+        if pts[0] == pts[-1]:
+            pts = pts[:-1]  # store the open ring; the viewer closes it
+        if len(pts) < 3:
+            raise TwinQueryError("polygon needs at least 3 distinct vertices", got=polygon)
+        pts = [(round(x, 2), round(y, 2)) for x, y in pts]
+
+        annotations, views = _load_view_doc()
+        ann = {"id": _next_annotation_id(annotations), "type": "polygon",
+               "label": _clean_label(label), "vertices": [[x, y] for x, y in pts],
+               "created_at": _utc_now()}
+        annotations.append(ann)
+        _save_view_doc(annotations, views)
+
+        cx = sum(x for x, _ in pts) / len(pts)
+        cy = sum(y for _, y in pts) / len(pts)
+        result = {
+            "drawn": {"id": ann["id"], "type": "polygon", "label": ann["label"],
+                      "vertex_count": len(pts),
+                      "area_m2": round(shoelace_area(pts), 1),
+                      "centroid": self.georef.echo(cx, cy),
+                      "vertices_scene_m": ann["vertices"]},
+            "annotations_total": len(annotations),
+            "note": f"Polygon {_DRAWN_NOTE}",
+        }
+        inside = self._within_extent([p[0] for p in pts], [p[1] for p in pts])
+        if inside is False:
+            result["warning"] = "some vertices fall outside the twin's extent"
+        return result
+
+    def draw_point(self, point, label=None):
+        x, y = resolve_point(point, self.georef)
+        x, y = round(x, 2), round(y, 2)
+        annotations, views = _load_view_doc()
+        ann = {"id": _next_annotation_id(annotations), "type": "point",
+               "label": _clean_label(label), "x": x, "y": y,
+               "created_at": _utc_now()}
+        annotations.append(ann)
+        _save_view_doc(annotations, views)
+        result = {
+            "drawn": {"id": ann["id"], "type": "point", "label": ann["label"],
+                      "position": self.georef.echo(x, y)},
+            "annotations_total": len(annotations),
+            "note": f"Point marker {_DRAWN_NOTE}",
+        }
+        if self._within_extent([x], [y]) is False:
+            result["warning"] = "the point falls outside the twin's extent"
+        return result
+
+    def clear_drawings(self):
+        annotations, views = _load_view_doc()
+        _save_view_doc([], views)
+        return {"cleared": len(annotations),
+                "note": "all drawings removed from the user's 3D map "
+                        "(layer views left untouched — use reset_layer_views "
+                        "to restore the user's layer toggles)"}
+
+    # -- layer views (atlas map-layer control) -------------------------------
+
+    def _drape_layer(self, layer_id):
+        """The atlas layer the agent can show/filter, or a structured error
+        listing the drape-able ids."""
+        layer = self._atlas_catalog().get(layer_id)
+        if layer is None or layer.get("type") not in DRAPE_TYPES:
+            raise TwinQueryError(
+                f"unknown or non-drape-able layer_id: {layer_id!r}",
+                valid_layer_ids=sorted(
+                    l["id"] for l in self._atlas_layers()
+                    if l.get("type") in DRAPE_TYPES))
+        return layer
+
+    def _filter_options(self, layer):
+        """How a layer can be filtered: its drape `kind` and the values a
+        filter may select (legend class names for rasters, modeled-habitat
+        species for the GAP grid, per-attribute distinct values for vectors)."""
+        lid = layer["id"]
+        sg = self._species_grids()
+        if lid == GAP_SPECIES_LAYER and sg:
+            names = sorted({s.get("common_name") for s in sg["species"].values()
+                            if s.get("common_name")})
+            return {"kind": "species", "field": "species",
+                    "fields": {"species": names}}
+        data = self._layer_data(layer)
+        if layer["type"] == "raster":
+            legend = (data.get("grid") or {}).get("legend") or {}
+            names = []
+            for meta in legend.values():
+                nm = (meta or {}).get("name")
+                if nm and nm not in names:
+                    names.append(nm)
+            return {"kind": "raster", "field": "class", "fields": {"class": names}}
+        fields = {}
+        labels = []
+        for f in data.get("features", []):
+            props = f.get("properties") or {}
+            # __label is the feature's friendly name and the primary filter
+            # target; it lives in HIDE_PROPS (hidden from identify cards) so it
+            # must be collected explicitly, not through the property loop below.
+            lbl = props.get("__label")
+            if lbl not in (None, "", " ") and str(lbl) not in labels:
+                labels.append(str(lbl))
+            for k, v in props.items():
+                if k in HIDE_PROPS or v in (None, "", " "):
+                    continue
+                vals = fields.setdefault(k, [])
+                if str(v) not in vals:
+                    vals.append(str(v))
+        fields["__label"] = labels
+        return {"kind": "vector", "field": "__label", "fields": fields}
+
+    def _upsert_layer_view(self, directive):
+        annotations, views = _load_view_doc()
+        views = [v for v in views if v.get("layer_id") != directive["layer_id"]]
+        views.append(directive)
+        _save_view_doc(annotations, views)
+        return views
+
+    def set_layer_visibility(self, layer_id, visible=True):
+        """Show or hide one atlas map layer on the user's live 3D terrain,
+        without filtering it."""
+        layer = self._drape_layer(layer_id)
+        directive = {"layer_id": layer_id, "visible": bool(visible),
+                     "filter": None, "created_at": _utc_now()}
+        views = self._upsert_layer_view(directive)
+        verb = "shown on" if visible else "hidden from"
+        return {
+            "layer": {"id": layer_id, "label": layer.get("label"),
+                      "type": layer.get("type")},
+            "visible": bool(visible),
+            "layer_views_total": len(views),
+            "note": f"{layer.get('label', layer_id)} is now {verb} the user's "
+                    "3D map. " + _LAYER_NOTE,
+        }
+
+    def filter_layer(self, layer_id, values, field=None):
+        """Reveal only the selected features/regions of an atlas layer (and turn
+        the layer on). values are legend class names for rasters, modeled-habitat
+        species common-names for the GAP species grid, or — for vector layers —
+        the distinct values of `field` (default the feature label). Everything
+        else in the layer is hidden until the filter is cleared."""
+        layer = self._drape_layer(layer_id)
+        if not isinstance(values, (list, tuple)) or not values:
+            raise TwinQueryError(
+                "values must be a non-empty list of names/classes to reveal",
+                got=values)
+        values = [str(v) for v in values]
+        opts = self._filter_options(layer)
+        kind = opts["kind"]
+        field = field or opts["field"]
+        available = opts["fields"].get(field)
+        if available is None:
+            raise TwinQueryError(
+                f"layer {layer_id!r} cannot be filtered on field {field!r}",
+                filterable_fields=sorted(opts["fields"].keys()))
+        by_lower = {a.lower(): a for a in available}
+        matched, unmatched = [], []
+        for v in values:
+            hit = by_lower.get(v.lower())
+            (matched if hit else unmatched).append(hit or v)
+        if not matched:
+            raise TwinQueryError(
+                f"none of the requested values exist in {layer_id!r} "
+                f"(field {field!r})",
+                requested=values, available_values=available[:60])
+        flt = {"field": field, "values": matched}
+        directive = {"layer_id": layer_id, "visible": True, "filter": flt,
+                     "kind": kind, "created_at": _utc_now()}
+        views = self._upsert_layer_view(directive)
+        result = {
+            "layer": {"id": layer_id, "label": layer.get("label"),
+                      "type": layer.get("type"), "filter_kind": kind},
+            "filter": flt,
+            "matched_values": matched,
+            "layer_views_total": len(views),
+            "note": f"{layer.get('label', layer_id)} now reveals only "
+                    f"{', '.join(matched)} on the user's 3D map; everything else "
+                    "in the layer is hidden. " + _LAYER_NOTE,
+        }
+        if unmatched:
+            result["unmatched_values"] = unmatched
+            result["warning"] = ("these values matched nothing in the layer and "
+                                 "were ignored — see layer_summary for the valid "
+                                 "names")
+        return result
+
+    def reset_layer_views(self):
+        """Drop every agent layer override, returning the user's manual layer
+        toggles to control. Leaves drawn polygons/points in place."""
+        annotations, views = _load_view_doc()
+        _save_view_doc(annotations, [])
+        return {"cleared": len(views),
+                "note": "all agent layer overrides removed; the user's manual "
+                        "layer toggles are back in control"}
 
 
 # ----------------------------------------------------------- CLI for demos

@@ -24,6 +24,7 @@
       draw: document.getElementById('chat-draw'),
       pick: document.getElementById('chat-pick'),
       clear: document.getElementById('chat-clear'),
+      key: document.getElementById('chat-key'),
       scope: document.getElementById('chat-scope'),
       messages: document.getElementById('chat-messages'),
       form: document.getElementById('chat-form'),
@@ -31,6 +32,37 @@
       send: document.getElementById('chat-send'),
     };
     if (!els.panel) return null;
+
+    /* ---------------- bring-your-own OpenAI key (browser-local) */
+
+    const KEY_STORE = 'veil_openai_key';
+    const getKey = () => {
+      try { return (localStorage.getItem(KEY_STORE) || '').trim(); } catch (_e) { return ''; }
+    };
+    function renderKeyButton() {
+      const has = !!getKey();
+      els.key.textContent = has ? 'Key ✓' : 'Key';
+      els.key.classList.toggle('active', has);
+      els.key.title = has
+        ? 'Your OpenAI key is set for this browser — click to change or remove it'
+        : 'Set your own OpenAI API key (stored only in this browser; sent per request)';
+    }
+    function promptKey() {
+      const current = getKey();
+      const entered = window.prompt(
+        current
+          ? 'Your OpenAI API key is set for this browser. Paste a new one to replace it, or clear the field to remove it:'
+          : 'Paste your OpenAI API key. It is stored only in this browser (localStorage) and sent with each question — it never touches the repo or the server\'s disk.',
+        current,
+      );
+      if (entered === null) return; // cancelled
+      try {
+        const v = entered.trim();
+        if (v) { localStorage.setItem(KEY_STORE, v); note('OpenAI key saved in this browser.'); }
+        else { localStorage.removeItem(KEY_STORE); note('OpenAI key removed from this browser.'); }
+      } catch (_e) { /* storage unavailable */ }
+      renderKeyButton();
+    }
 
     const state = {
       mode: null,            // null | 'draw' | 'pick'
@@ -268,9 +300,12 @@
       state.busy = true;
       els.send.disabled = true;
       try {
+        const headers = { 'Content-Type': 'application/json' };
+        const userKey = getKey();
+        if (userKey) headers['X-OpenAI-Key'] = userKey;
         const res = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ messages: state.history, scope: buildScopePayload() }),
         });
         const data = await res.json();
@@ -283,6 +318,9 @@
         (data.trace || []).forEach(traceLine);
         state.history.push({ role: 'assistant', content: data.reply });
         bubble('bot', renderText(data.reply || '(empty reply)'));
+        // the model may have drawn on the map mid-answer; show it now
+        // instead of waiting for the annotations poll
+        global.__twin?.annotations?.refresh();
       } catch (err) {
         pending.remove();
         state.history.pop();
@@ -298,6 +336,7 @@
     els.draw.addEventListener('click', startDraw);
     els.pick.addEventListener('click', startPick);
     els.clear.addEventListener('click', () => clearSelection('Selection cleared — back to the whole land.'));
+    els.key.addEventListener('click', promptKey);
     els.form.addEventListener('submit', (e) => {
       e.preventDefault();
       const text = els.input.value.trim();
@@ -321,6 +360,17 @@
     });
 
     renderScope();
+    renderKeyButton();
+
+    // Ask the server which provider is active: a local model (Ollama) needs no
+    // key, so hide the "Key" button and name the model in the intro.
+    fetch('/api/chat/config').then((r) => r.json()).then((cfg) => {
+      if (cfg && cfg.needs_key === false) {
+        els.key.style.display = 'none';
+        note(`Running locally on ${cfg.model} — no API key needed.`);
+      }
+    }).catch(() => { /* leave the OpenAI/BYOK defaults in place */ });
+
     return {
       state,
       clearSelection,

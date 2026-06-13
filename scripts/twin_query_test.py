@@ -4,13 +4,16 @@
 No mocks, no test framework: twin builds are deterministic (seeded RNGs,
 journaled history), so real-data assertions are cheap and meaningful.
 
-By default the suite runs against the bundled Flatirons demo twin
-(twins/demo/data), building it first with scripts/build_from_aoi.py if it
-isn't there (one-time; needs internet + GDAL). Every expectation is derived
-from the twin under test, never hardcoded to a place, so the same suite runs
-against any twin:
+By default the suite runs against the tiny committed fixture twin
+(tests/fixtures/mini-twin/data) — a synthetic, network-free twin so `npm test`
+runs offline in CI (built by scripts/build_test_fixture.py). Point TWIN_DATA_DIR
+at the Flatirons demo (twins/demo/data) for the real-data test — that twin is
+built on first run from live national services (needs internet + GDAL).
+Every expectation is derived from the twin under test, never hardcoded to a
+place, so the same suite runs against any twin:
 
-    python3 scripts/twin_query_test.py            # demo twin (or: npm test)
+    python3 scripts/twin_query_test.py            # fixture twin (or: npm test)
+    npm run test:demo                             # real-data demo twin
     TWIN_DATA_DIR=./twins/mine/data python3 scripts/twin_query_test.py
 """
 
@@ -27,22 +30,29 @@ PROJECT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 # Pick the twin BEFORE importing the engine modules — they resolve
-# TWIN_DATA_DIR at import time.
+# TWIN_DATA_DIR at import time. Default: the committed offline fixture.
+FIXTURE_DATA = os.path.join(PROJECT, "tests", "fixtures", "mini-twin", "data")
 DEMO_DATA = os.path.join(PROJECT, "twins", "demo", "data")
 if not os.environ.get("TWIN_DATA_DIR"):
-    os.environ["TWIN_DATA_DIR"] = DEMO_DATA
+    os.environ["TWIN_DATA_DIR"] = FIXTURE_DATA
 DATA = os.path.abspath(os.environ["TWIN_DATA_DIR"])
 
 if not os.path.exists(os.path.join(DATA, "twin.gpkg")):
-    if DATA != os.path.abspath(DEMO_DATA):
+    if DATA == os.path.abspath(DEMO_DATA):
+        print("demo twin not found — building it (one-time; needs internet + GDAL)…")
+        subprocess.run(
+            [sys.executable, os.path.join(HERE, "build_from_aoi.py"),
+             "--aoi", os.path.join(PROJECT, "packs", "us-national", "demo",
+                                   "flatirons_aoi.shp"),
+             "--data-dir", DATA, "--name", "Flatirons demo", "--force"],
+            check=True)
+    elif DATA == os.path.abspath(FIXTURE_DATA):
+        print("fixture twin not found — building it (offline)…")
+        subprocess.run(
+            [sys.executable, os.path.join(HERE, "build_test_fixture.py")],
+            check=True)
+    else:
         sys.exit(f"no twin store at {DATA}/twin.gpkg — build that twin first")
-    print("demo twin not found — building it (one-time; needs internet + GDAL)…")
-    subprocess.run(
-        [sys.executable, os.path.join(HERE, "build_from_aoi.py"),
-         "--aoi", os.path.join(PROJECT, "packs", "us-national", "demo",
-                               "flatirons_aoi.shp"),
-         "--data-dir", DATA, "--name", "Flatirons demo", "--force"],
-        check=True)
 
 import twin_georef  # noqa: E402
 import twin_query  # noqa: E402
@@ -458,6 +468,180 @@ if HAS_TREES:
     expect_error("bad member rejected", tq.canopy_change, member="nope")
 else:
     skip("find_entities/summarize/aggregate/canopy sections", "twin has no trees")
+
+print("== map drawings ==")
+# draw_* writes <data>/annotations.json (never the store); snapshot and
+# restore whatever drawings the twin under test already has.
+ANN = twin_query.ANNOTATIONS_PATH
+ann_backup = open(ANN).read() if os.path.exists(ANN) else None
+try:
+    tq.clear_drawings()
+    pt = tq.draw_point({"x": 50, "y": 100}, label="anchor " + "x" * 200)
+    check("draw_point echoes both coordinate forms",
+          pt["drawn"]["position"]["x"] == 50 and "lat" in pt["drawn"]["position"]
+          and "lon" in pt["drawn"]["position"])
+    check("draw_point caps the label",
+          len(pt["drawn"]["label"]) == twin_query.ANNOTATION_LABEL_MAX)
+    pt2 = tq.draw_point({"lat": _lat, "lon": _lon})
+    check("lat/lon draw_point lands on the same scene spot",
+          math.hypot(pt2["drawn"]["position"]["x"] - 50,
+                     pt2["drawn"]["position"]["y"] - 100) < 0.05)
+    check("drawing ids are distinct and sequential",
+          pt["drawn"]["id"] != pt2["drawn"]["id"]
+          and pt2["annotations_total"] == 2)
+
+    square = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]
+    pg = tq.draw_polygon(square, label="square")
+    check("draw_polygon reports shoelace area",
+          abs(pg["drawn"]["area_m2"] - 10000) < 1)
+    check("draw_polygon stores the open ring",
+          pg["drawn"]["vertex_count"] == 4 and pg["annotations_total"] == 3)
+    geo_square = [list(G.to_lonlat(x, y)) for x, y in square]
+    pg2 = tq.draw_polygon(geo_square)
+    check("lon/lat polygon auto-detected to the same scene vertices",
+          all(math.hypot(a[0] - b[0], a[1] - b[1]) < 0.05
+              for a, b in zip(pg2["drawn"]["vertices_scene_m"], square)))
+
+    with open(ANN) as fh:
+        doc = json.load(fh)
+    check("annotations file holds every drawing (scene-local meters)",
+          len(doc["annotations"]) == 4
+          and doc["annotations"][0]["type"] == "point"
+          and doc["annotations"][0]["x"] == 50
+          and doc["annotations"][2]["vertices"][1] == [100, 0])
+
+    expect_error("two-vertex draw_polygon rejected",
+                 tq.draw_polygon, [[0, 0], [1, 1]])
+    expect_error("degenerate closed ring rejected",
+                 tq.draw_polygon, [[0, 0], [1, 1], [0, 0]])
+    expect_error("draw_point with half a pair rejected", tq.draw_point, {"x": 1})
+
+    cleared = tq.clear_drawings()
+    check("clear_drawings reports the count", cleared["cleared"] == 4)
+    with open(ANN) as fh:
+        check("cleared file is empty", json.load(fh)["annotations"] == [])
+finally:
+    if ann_backup is None:
+        if os.path.exists(ANN):
+            os.remove(ANN)
+    else:
+        with open(ANN, "w") as fh:
+            fh.write(ann_backup)
+
+print("== layer views ==")
+# set_layer_visibility / filter_layer write layer_views into the same
+# annotations.json (never the store); snapshot and restore it like the drawings.
+lv_backup = open(ANN).read() if os.path.exists(ANN) else None
+try:
+    tq.clear_drawings()
+    tq.reset_layer_views()
+    # the atlas catalog (viewer-layers.json) is the drape source of truth — the
+    # store's layers table can be empty on twins built before layer registration.
+    drape = [l["id"] for l in tq._atlas_layers()
+             if l.get("type") in twin_query.DRAPE_TYPES]
+    if not drape:
+        skip("layer-view section", "twin has no drape-able atlas layers")
+    else:
+        lid = drape[0]
+        vis = tq.set_layer_visibility(lid)
+        check("set_layer_visibility records a visible directive",
+              vis["visible"] is True and vis["layer"]["id"] == lid)
+        with open(ANN) as fh:
+            doc = json.load(fh)
+        check("layer_views written to the directive file",
+              any(v["layer_id"] == lid and v["visible"] for v in doc["layer_views"]))
+        tq.set_layer_visibility(lid, visible=False)
+        with open(ANN) as fh:
+            doc = json.load(fh)
+        same = [v for v in doc["layer_views"] if v["layer_id"] == lid]
+        check("re-setting a layer replaces (not duplicates) its directive",
+              len(same) == 1 and same[0]["visible"] is False)
+
+        # a drawing and a layer view coexist in the one file
+        tq.draw_point({"x": PX, "y": PY}, label="coexist")
+        with open(ANN) as fh:
+            doc = json.load(fh)
+        check("a drawing and a layer view live in the same file",
+              len(doc["annotations"]) == 1 and len(doc["layer_views"]) == 1)
+        cleared = tq.clear_drawings()
+        with open(ANN) as fh:
+            doc = json.load(fh)
+        check("clear_drawings leaves layer views intact",
+              cleared["cleared"] == 1 and doc["annotations"] == []
+              and len(doc["layer_views"]) == 1)
+
+        # filter discovery + apply — scan for a layer with a filterable value,
+        # using the same options the tool validates against (the default field
+        # for the layer: legend class / species / __label).
+        target = None
+        for cand in drape:
+            opts = tq._filter_options(tq._atlas_catalog()[cand])
+            vals = opts["fields"].get(opts["field"]) or []
+            if vals:
+                target = (cand, vals[0])
+                break
+        if target is None:
+            skip("filter_layer positive assertions", "no filterable values")
+        else:
+            flid, sample = target
+            res = tq.filter_layer(flid, [sample])
+            check("filter_layer reveals only the matched value and forces visible",
+                  res["matched_values"] == [sample]
+                  and res["filter"]["values"] == [sample])
+            with open(ANN) as fh:
+                doc = json.load(fh)
+            v = [d for d in doc["layer_views"] if d["layer_id"] == flid][0]
+            check("filter directive carries the filter and is visible",
+                  v["visible"] is True and v["filter"]["values"] == [sample])
+            res2 = tq.filter_layer(flid, [sample.upper()])
+            check("filter matching is case-insensitive",
+                  res2["matched_values"] == [sample])
+            expect_error("filter_layer rejects values that match nothing",
+                         tq.filter_layer, flid, ["__definitely_not_a_class__"])
+
+        # the headline GAP case: reveal one species' modeled habitat
+        gap = (tq.layer_summary("gap_species_richness")
+               if "gap_species_richness" in drape else {})
+        spp = gap.get("filterable_species")
+        if spp:
+            sres = tq.filter_layer("gap_species_richness", [spp[0]])
+            check("filter_layer on the GAP grid filters by species (habitat mask)",
+                  sres["layer"]["filter_kind"] == "species"
+                  and sres["filter"]["field"] == "species"
+                  and sres["matched_values"] == [spp[0]])
+        else:
+            skip("GAP species filter", "twin has no per-species habitat grids")
+
+        expect_error("unknown layer_id rejected",
+                     tq.set_layer_visibility, "__no_such_layer__")
+        expect_error("filter_layer needs a non-empty value list",
+                     tq.filter_layer, lid, [])
+
+        reset = tq.reset_layer_views()
+        with open(ANN) as fh:
+            doc = json.load(fh)
+        check("reset_layer_views clears every override",
+              reset["cleared"] >= 1 and doc["layer_views"] == [])
+finally:
+    if lv_backup is None:
+        if os.path.exists(ANN):
+            os.remove(ANN)
+    else:
+        with open(ANN, "w") as fh:
+            fh.write(lv_backup)
+
+print("== survey companion ==")
+sv = tq.list_survey_layers()
+check("list_survey_layers returns a catalog shape",
+      isinstance(sv.get("layers"), list) and sv["count"] == len(sv["layers"]))
+if sv["count"] == 0:
+    check("empty survey catalog carries a note", bool(sv.get("note")))
+else:
+    check("survey layers expose kind + geometry_type + fields", all(
+        l.get("kind", "").startswith("survey_") and l.get("geometry_type")
+        and isinstance(l.get("fields"), list) for l in sv["layers"]))
+check("identify_at now carries a survey block (list)",
+      isinstance(tq.identify_at({"x": PX, "y": PY}).get("survey"), list))
 
 conn.close()
 print(f"\n{PASS} passed, {FAIL} failed")

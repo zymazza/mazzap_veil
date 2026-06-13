@@ -1,12 +1,5 @@
 (function attachSceneViewer(global) {
   const { THREE, VEILCamera, VEILTerrain, VEILVegetation, VEILOverlays } = global;
-  const VEGETATION_CHUNK_CONFIG = {
-    defaultLoadRadiusHintChunks: 2,
-    defaultSizeMeters: 96,
-    farCameraRingDistanceMeters: 420,
-    minLoadRadiusHintChunks: 1,
-    minSizeMeters: 24,
-  };
   const VIEWER_CAMERA_DEFAULTS = {
     far: 10000,
     fov: 50,
@@ -36,40 +29,6 @@
 
   function debugLog(event, payload = {}) {
     global.__VEIL_DEBUG__?.log?.(event, payload);
-  }
-
-  function parseResourceUrl(url) {
-    if (typeof url !== 'string' || !url) {
-      return null;
-    }
-
-    try {
-      return new URL(url, global.location?.origin || 'http://localhost');
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function readResourceVersionToken(url) {
-    const value = parseResourceUrl(url)?.searchParams.get('v');
-    return typeof value === 'string' && value.trim() ? value.trim() : null;
-  }
-
-  function appendResourceVersionToken(url, versionToken) {
-    if (typeof url !== 'string' || !url || !versionToken) {
-      return url;
-    }
-
-    const parsed = parseResourceUrl(url);
-    if (parsed) {
-      if (!parsed.searchParams.has('v')) {
-        parsed.searchParams.set('v', versionToken);
-      }
-      return `${parsed.pathname}${parsed.search}`;
-    }
-
-    const separator = url.includes('?') ? '&' : '?';
-    return `${url}${separator}v=${encodeURIComponent(versionToken)}`;
   }
 
   function createAbortError() {
@@ -111,25 +70,6 @@
       return Math.floor(payload.items.length / Number(payload.stride));
     }
     return 0;
-  }
-
-  function createVegetationChunkState() {
-    return {
-      availableKeys: {
-        shrubs: new Set(),
-        trees: new Set(),
-      },
-      chunkSize: VEGETATION_CHUNK_CONFIG.defaultSizeMeters,
-      lastSignature: null,
-      loaded: {
-        shrubs: new Map(),
-        trees: new Map(),
-      },
-      loadRadiusHint: VEGETATION_CHUNK_CONFIG.defaultLoadRadiusHintChunks,
-      manifest: null,
-      pending: new Map(),
-      requestVersion: 0,
-    };
   }
 
   function readSceneComputeJob(scenePayload, layerId) {
@@ -193,38 +133,6 @@
       message: message || options.waitingMessage || `Waiting for ${layerLabel.toLowerCase()} layer`,
       status: 'queued',
     };
-  }
-
-  function getPackedItemsArray(payload) {
-    if (payload && (Array.isArray(payload.items) || ArrayBuffer.isView(payload.items))) {
-      return payload.items;
-    }
-    return [];
-  }
-
-  function mergePackedVegetationPayload(kind, payloads) {
-    const stride = kind === 'tree' ? 4 : 3;
-    const totalLength = payloads.reduce((sum, payload) => sum + getPackedItemsArray(payload).length, 0);
-    const items = new Float32Array(totalLength);
-    let offset = 0;
-
-    payloads.forEach((payload) => {
-      const source = getPackedItemsArray(payload);
-      items.set(source, offset);
-      offset += source.length;
-    });
-
-    return {
-      count: Math.floor(totalLength / stride),
-      format: 'packed-vegetation-v1',
-      items,
-      kind,
-      stride,
-    };
-  }
-
-  function getChunkKeyForLocalPoint(x, y, chunkSize) {
-    return `${Math.floor(Number(x) / chunkSize)}_${Math.floor(Number(y) / chunkSize)}`;
   }
 
   class WorkspaceViewer {
@@ -310,8 +218,6 @@
         treeInstances: [],
         shrubPoints: [],
       };
-      this.vegetationChunkState = createVegetationChunkState();
-      this.lastVegetationChunkSyncAt = 0;
       this.loadToken = 0;
       this.animationFrame = null;
       this.activeFetchControllers = new Set();
@@ -365,7 +271,7 @@
           layerBlock: this.scenePayload.roads_trails,
           layerLabel: 'Trails',
         }],
-        ['vegetation', !vegetation.tree_instances_url && !vegetation.shrub_points_url && !vegetation.chunks_url, {
+        ['vegetation', !vegetation.tree_instances_url && !vegetation.shrub_points_url, {
           layerBlock: vegetation,
           layerLabel: 'Vegetation',
         }],
@@ -439,8 +345,6 @@
         treeInstances: [],
         shrubPoints: [],
       };
-      this.vegetationChunkState = createVegetationChunkState();
-      this.lastVegetationChunkSyncAt = 0;
     }
 
     disposeTextureCache() {
@@ -528,14 +432,6 @@
         });
     }
 
-    buildVegetationChunkUrl(kind, key) {
-      const versionToken = readResourceVersionToken(this.scenePayload?.vegetation?.chunks_url);
-      return appendResourceVersionToken(
-        `/api/workspaces/${this.scenePayload.workspace_id}/vegetation/chunks/${kind}/${encodeURIComponent(key)}.json`,
-        versionToken
-      );
-    }
-
     rerenderOverlayLayers() {
       this.overlayRenderer.load({
         buildings: this.overlayData.buildings,
@@ -580,215 +476,6 @@
       });
     }
 
-    setVegetationChunkManifest(manifest) {
-      const nextState = createVegetationChunkState();
-      nextState.requestVersion = this.vegetationChunkState.requestVersion + 1;
-      nextState.manifest = manifest || null;
-      nextState.chunkSize = Math.max(
-        VEGETATION_CHUNK_CONFIG.minSizeMeters,
-        Number(manifest?.chunk_size) || VEGETATION_CHUNK_CONFIG.defaultSizeMeters
-      );
-      nextState.loadRadiusHint = Math.max(
-        VEGETATION_CHUNK_CONFIG.minLoadRadiusHintChunks,
-        Number(manifest?.load_radius_hint_chunks) ||
-          VEGETATION_CHUNK_CONFIG.defaultLoadRadiusHintChunks
-      );
-      nextState.availableKeys.trees = new Set((manifest?.trees?.chunks || []).map((chunk) => String(chunk.key)));
-      nextState.availableKeys.shrubs = new Set((manifest?.shrubs?.chunks || []).map((chunk) => String(chunk.key)));
-      this.vegetationChunkState = nextState;
-      debugLog('viewer-vegetation-manifest', {
-        chunk_size: nextState.chunkSize,
-        load_radius_hint: nextState.loadRadiusHint,
-        shrub_chunks: nextState.availableKeys.shrubs.size,
-        tree_chunks: nextState.availableKeys.trees.size,
-        workspace_id: this.scenePayload?.workspace_id || null,
-      });
-    }
-
-    rebuildVegetationDataFromLoadedChunks() {
-      this.vegetationData = {
-        shrubPoints: mergePackedVegetationPayload(
-          'shrub',
-          Array.from(this.vegetationChunkState.loaded.shrubs.values())
-        ),
-        treeInstances: mergePackedVegetationPayload(
-          'tree',
-          Array.from(this.vegetationChunkState.loaded.trees.values())
-        ),
-      };
-      this.rerenderVegetation();
-      debugLog('viewer-vegetation-chunks-merged', {
-        loaded_shrub_chunks: this.vegetationChunkState.loaded.shrubs.size,
-        loaded_tree_chunks: this.vegetationChunkState.loaded.trees.size,
-        workspace_id: this.scenePayload?.workspace_id || null,
-      });
-    }
-
-    getVegetationChunkViewState() {
-      if (!this.terrainGrid || !this.vegetationChunkState.manifest) {
-        return null;
-      }
-
-      const chunkSize = this.vegetationChunkState.chunkSize;
-      const centerX = Number(this.controls.target.x || 0);
-      const centerY = Number(-this.controls.target.z || 0);
-      const cameraDistance = this.camera.position.distanceTo(this.controls.target);
-      const ring =
-        cameraDistance > VEGETATION_CHUNK_CONFIG.farCameraRingDistanceMeters
-          ? this.vegetationChunkState.loadRadiusHint
-          : Math.max(
-            VEGETATION_CHUNK_CONFIG.minLoadRadiusHintChunks,
-            this.vegetationChunkState.loadRadiusHint - 1
-          );
-      const centerKey = getChunkKeyForLocalPoint(centerX, centerY, chunkSize);
-
-      return {
-        centerKey,
-        centerX,
-        centerY,
-        ring,
-        signature: `${centerKey}:${ring}`,
-      };
-    }
-
-    getDesiredVegetationChunkKeys(kind, viewState) {
-      const keys = new Set();
-      const [chunkX, chunkY] = String(viewState.centerKey)
-        .split('_')
-        .map((value) => Number(value));
-      const available = this.vegetationChunkState.availableKeys[kind];
-
-      for (let offsetX = -viewState.ring; offsetX <= viewState.ring; offsetX += 1) {
-        for (let offsetY = -viewState.ring; offsetY <= viewState.ring; offsetY += 1) {
-          const key = `${chunkX + offsetX}_${chunkY + offsetY}`;
-          if (available.has(key)) {
-            keys.add(key);
-          }
-        }
-      }
-
-      return keys;
-    }
-
-    async updateVegetationChunks(options = {}) {
-      const manifest = this.vegetationChunkState.manifest;
-      if (!manifest || !this.scenePayload?.workspace_id) {
-        return;
-      }
-
-      const viewState = this.getVegetationChunkViewState();
-      if (!viewState) {
-        return;
-      }
-
-      if (!options.force && viewState.signature === this.vegetationChunkState.lastSignature) {
-        return;
-      }
-      this.vegetationChunkState.lastSignature = viewState.signature;
-      debugLog('viewer-vegetation-chunk-sync', {
-        center_key: viewState.centerKey,
-        ring: viewState.ring,
-        signature: viewState.signature,
-        workspace_id: this.scenePayload?.workspace_id || null,
-      });
-
-      const desired = {
-        shrubs: this.getDesiredVegetationChunkKeys('shrubs', viewState),
-        trees: this.getDesiredVegetationChunkKeys('trees', viewState),
-      };
-
-      let changed = false;
-      ['trees', 'shrubs'].forEach((kind) => {
-        Array.from(this.vegetationChunkState.loaded[kind].keys()).forEach((key) => {
-          if (!desired[kind].has(key)) {
-            this.vegetationChunkState.loaded[kind].delete(key);
-            changed = true;
-          }
-        });
-      });
-
-      if (changed) {
-        this.rebuildVegetationDataFromLoadedChunks();
-      }
-
-      const requestVersion = this.vegetationChunkState.requestVersion;
-      const sceneLoadToken = options.sceneLoadToken ?? this.loadToken;
-      const fetches = [];
-
-      ['trees', 'shrubs'].forEach((kindPlural) => {
-        const kindSingular = kindPlural === 'trees' ? 'tree' : 'shrub';
-        desired[kindPlural].forEach((key) => {
-          if (this.vegetationChunkState.loaded[kindPlural].has(key)) {
-            return;
-          }
-          const pendingKey = `${kindSingular}:${key}`;
-          if (this.vegetationChunkState.pending.has(pendingKey)) {
-            if (options.waitForPending) {
-              fetches.push(this.vegetationChunkState.pending.get(pendingKey));
-            }
-            return;
-          }
-
-          const request = this.fetchJson(this.buildVegetationChunkUrl(kindSingular, key))
-            .then((payload) => {
-              if (
-                requestVersion !== this.vegetationChunkState.requestVersion ||
-                sceneLoadToken !== this.loadToken
-              ) {
-                return false;
-              }
-              this.vegetationChunkState.loaded[kindPlural].set(key, payload);
-              debugLog('viewer-vegetation-chunk-loaded', {
-                count: payload?.count || 0,
-                key,
-                kind: kindSingular,
-                workspace_id: this.scenePayload?.workspace_id || null,
-              });
-              return true;
-            })
-            .catch((error) => {
-              if (
-                this.destroyed ||
-                requestVersion !== this.vegetationChunkState.requestVersion ||
-                sceneLoadToken !== this.loadToken ||
-                isAbortError(error)
-              ) {
-                return false;
-              }
-              debugLog('viewer-vegetation-chunk-error', {
-                error: error.message,
-                key,
-                kind: kindSingular,
-                workspace_id: this.scenePayload?.workspace_id || null,
-              });
-              return false;
-            })
-            .finally(() => {
-              this.vegetationChunkState.pending.delete(pendingKey);
-            });
-
-          this.vegetationChunkState.pending.set(pendingKey, request);
-          fetches.push(request);
-        });
-      });
-
-      if (options.waitForPending) {
-        const results = await Promise.all(fetches);
-        if (results.some(Boolean)) {
-          this.rebuildVegetationDataFromLoadedChunks();
-        }
-        return;
-      }
-
-      if (fetches.length) {
-        Promise.all(fetches).then((results) => {
-          if (results.some(Boolean)) {
-            this.rebuildVegetationDataFromLoadedChunks();
-          }
-        });
-      }
-    }
-
     async streamLoad(scenePayload, callbacks = {}) {
       if (this.destroyed) {
         return;
@@ -817,8 +504,6 @@
         load_token: loadToken,
         workspace_id: scenePayload?.workspace_id || null,
       });
-      const shouldLoadFullVegetation =
-        Boolean(vegetation.tree_instances_url) || Boolean(vegetation.shrub_points_url);
       const gridPromise = this.prefetchJson(scenePayload.terrain.grid_url);
       const aoiBoundaryPromise = this.prefetchJson(scenePayload.aoi_boundary?.geojson_url);
       const parcelsPromise = this.prefetchJson(scenePayload.parcels?.features_url);
@@ -833,14 +518,12 @@
           .filter(([, url]) => Boolean(url))
           .map(([layerId, url]) => [layerId, this.prefetchJson(url)])
       );
-      const vegetationChunkManifestPromise =
-        !shouldLoadFullVegetation && vegetation.chunks_url ? this.prefetchJson(vegetation.chunks_url) : null;
       const treeInstancesPromise =
-        shouldLoadFullVegetation && vegetation.tree_instances_url
+        vegetation.tree_instances_url
           ? this.prefetchJson(vegetation.tree_instances_url)
           : Promise.resolve({ error: null, payload: [] });
       const shrubPointsPromise =
-        shouldLoadFullVegetation && vegetation.shrub_points_url
+        vegetation.shrub_points_url
           ? this.prefetchJson(vegetation.shrub_points_url)
           : Promise.resolve({ error: null, payload: [] });
       reportLoading('terrain');
@@ -956,7 +639,7 @@
           });
       });
 
-      if (!vegetation.tree_instances_url && !vegetation.shrub_points_url && !vegetation.chunks_url) {
+      if (!vegetation.tree_instances_url && !vegetation.shrub_points_url) {
         const nextState = resolveDeferredLayerState(scenePayload, 'vegetation', {
           layerBlock: vegetation,
           layerLabel: 'Vegetation',
@@ -968,35 +651,6 @@
         return;
       }
       reportLoading('vegetation');
-
-      if (!shouldLoadFullVegetation && vegetation.chunks_url) {
-        vegetationChunkManifestPromise
-          .then(async ({ error, payload: chunkManifest }) => {
-            if (error) {
-              reportError('vegetation', error);
-              return;
-            }
-            if (loadToken !== this.loadToken) {
-              return;
-            }
-            this.setVegetationChunkManifest(chunkManifest);
-            await this.updateVegetationChunks({ force: true, sceneLoadToken: loadToken, waitForPending: true });
-            reportSuccess('vegetation', {
-              count:
-                Number(chunkManifest?.trees?.total_count || 0) + Number(chunkManifest?.shrubs?.total_count || 0),
-              rendered_count: (this.renderStats.trees || 0) + (this.renderStats.shrubs || 0),
-              trees: this.renderStats.trees || 0,
-              shrubs: this.renderStats.shrubs || 0,
-            });
-            debugLog('viewer-vegetation-ready', {
-              mode: 'chunked',
-              rendered_shrubs: this.renderStats.shrubs || 0,
-              rendered_trees: this.renderStats.trees || 0,
-              workspace_id: scenePayload?.workspace_id || null,
-            });
-          });
-        return;
-      }
 
       Promise.all([
         treeInstancesPromise,
@@ -1374,10 +1028,6 @@
       const deltaSeconds = Math.min(0.05, Math.max(0, (now - this.lastFrameTime) / 1000));
       this.lastFrameTime = now;
       VEILCamera.applyKeyboardPan(this.camera, this.controls, this.keyboardPanState, deltaSeconds);
-      if (this.vegetationChunkState.manifest && now - this.lastVegetationChunkSyncAt >= 250) {
-        this.lastVegetationChunkSyncAt = now;
-        this.updateVegetationChunks().catch(() => {});
-      }
       this.overlayRenderer.tick(deltaSeconds);
       this.controls.update();
       this.renderer.render(this.scene, this.camera);

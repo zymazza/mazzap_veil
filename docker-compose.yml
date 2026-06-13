@@ -1,0 +1,37 @@
+# VEIL in a container. `docker compose up` builds the image (Node + GDAL +
+# numpy + pyproj + Pillow + mcp, all pinned) and serves the viewer; the same
+# image runs every pipeline step via `docker compose run`.
+#
+#   docker compose up --build                      # serve ./data at :4173
+#   docker compose run --rm veil npm run demo      # build the Flatirons demo twin
+#   TWIN_DATA_DIR=/app/twins/demo/data docker compose up   # serve the demo twin
+#
+# ./data and ./twins are bind-mounted, so twins built inside the container
+# persist to the host (and stay private/gitignored).
+services:
+  veil:
+    build:
+      context: .
+      args:
+        GDAL_VERSION: "3.9.3"
+        NODE_MAJOR: "20"
+    image: veil:latest
+    ports:
+      - "4173:4173"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "4173"
+      # Which twin to serve / operate on. Point at /app/twins/<name>/data for
+      # an alternate twin.
+      TWIN_DATA_DIR: "${TWIN_DATA_DIR:-/app/data}"
+      # "Ask the land" chat panel (optional). Set OPENAI_API_KEY in your shell
+      # or a .env file, or mount a .openai_key file (below).
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
+      OPENAI_REASONING_EFFORT: "${OPENAI_REASONING_EFFORT:-low}"
+    volumes:
+      # Twin data lives on the host (private/gitignored) and is built/served here.
+      - ./data:/app/data
+      - ./twins:/app/twins
+      # Optional: provide the chat key as a file instead of an env var.
+      # - ./.openai_key:/app/.openai_key:ro

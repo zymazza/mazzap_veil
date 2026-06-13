@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Rebuild data/twin.gpkg from the committed write journal (data/journal/).
+"""Rebuild data/twin.gpkg from the append-only write journal (data/journal/).
 
 The journal is the canonical history; the gpkg is a materialized index of it.
-Replaying reproduces the store exactly — same runs, same timestamps, same
-observation order (and therefore the same latest-per-attr state). Use after a
-fresh clone, or to restore the journaled truth if the gpkg is lost, corrupted,
-or ahead of the journal after a crashed run.
+(Both are private/gitignored, inside the twin's data dir — never committed to
+this repo.) Replaying reproduces the store exactly — same runs, same
+timestamps, same observation order (and therefore the same latest-per-attr
+state). Use after carrying a twin's data dir to a new machine, or to restore the
+journaled truth if the gpkg is lost, corrupted, or ahead of the journal after a
+crashed run.
 
 The existing gpkg (if any) is kept as data/twin.gpkg.bak.
 
