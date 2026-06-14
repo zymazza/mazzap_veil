@@ -1027,6 +1027,14 @@
       const now = performance.now();
       const deltaSeconds = Math.min(0.05, Math.max(0, (now - this.lastFrameTime) / 1000));
       this.lastFrameTime = now;
+      // First-person explorer takes over the camera: drive movement directly and
+      // skip the orbit controls / keyboard-pan (which would fight for the camera).
+      if (this.povController?.active) {
+        this.povController.update(deltaSeconds);
+        this.overlayRenderer.tick(deltaSeconds);
+        this.renderer.render(this.scene, this.camera);
+        return;
+      }
       VEILCamera.applyKeyboardPan(this.camera, this.controls, this.keyboardPanState, deltaSeconds);
       this.overlayRenderer.tick(deltaSeconds);
       this.controls.update();

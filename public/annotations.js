@@ -148,11 +148,25 @@
       await refresh();
     }
 
+    // Each viewer open starts from a clean map: wipe any drawings (and the
+    // layer-view overrides) an LLM left in data/annotations.json during a prior
+    // session, so stale orange shapes never greet the next visit. The clear()
+    // POST empties the file server-side and the follow-up refresh repaints the
+    // now-empty scene; if the server is unreachable we fall back to a passive
+    // read of whatever's on disk (initial-poll semantics: ignore layer_views).
+    async function clearOnOpen() {
+      try {
+        const res = await fetch('/api/annotations/clear', { method: 'POST' });
+        if (res.ok) { await refresh(); return; }
+      } catch (_err) { /* server gone — show whatever's on disk */ }
+      refresh(true);
+    }
+
     if (clearBtn) {
       clearBtn.disabled = true;
       clearBtn.addEventListener('click', clear);
     }
-    refresh(true);
+    clearOnOpen();
     setInterval(refresh, POLL_MS);
 
     return { state, refresh, clear };

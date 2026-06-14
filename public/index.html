@@ -37,6 +37,14 @@
       </details>
 
       <details class="menu-section" open>
+        <summary class="collapsible-header"><span class="panel-label">Explore</span></summary>
+        <div class="collapsible-body">
+          <button type="button" id="pov-toggle" title="Drop onto any spot and walk the land in first person">Walk the land (POV)</button>
+          <p class="readout-hint" id="pov-hint">Then click anywhere on the terrain to drop in. WASD to move, mouse to look, Shift to run, Esc to exit.</p>
+        </div>
+      </details>
+
+      <details class="menu-section" open>
         <summary class="collapsible-header"><span class="panel-label">Scene layers</span></summary>
         <div class="collapsible-body">
           <div id="layer-toggles" class="toggle-list"></div>
@@ -154,6 +162,7 @@
   <script src="/viewer/buildings3d.js"></script>
   <script src="/viewer/building-editor.js"></script>
   <script src="/viewer/georef.js"></script>
+  <script src="/viewer/pov.js"></script>
   <script src="/viewer/scene.js"></script>
   <script src="/annotations.js"></script>
   <script src="/chat.js"></script>

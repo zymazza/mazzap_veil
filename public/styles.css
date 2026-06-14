@@ -127,6 +127,46 @@ details:not([open]) > .collapsible-header::after {
   color: var(--accent);
 }
 
+/* POV explorer: full-width toggle + first-person overlay (crosshair + banner) */
+#pov-toggle {
+  width: 100%; font: inherit; font-size: 12.5px; color: var(--fg);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--card-border);
+  border-radius: 8px; padding: 8px 10px; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+#pov-toggle:hover { background: rgba(255, 255, 255, 0.09); }
+#pov-toggle.active {
+  background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+}
+
+#pov-overlay {
+  position: fixed; inset: 0; z-index: 40; pointer-events: none;
+}
+#pov-overlay[hidden] { display: none; }
+#pov-crosshair {
+  position: absolute; left: 50%; top: 50%; width: 18px; height: 18px;
+  transform: translate(-50%, -50%);
+  display: none;
+}
+#pov-crosshair::before, #pov-crosshair::after {
+  content: ''; position: absolute; background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+}
+#pov-crosshair::before { left: 50%; top: 0; width: 1.5px; height: 100%; transform: translateX(-50%); }
+#pov-crosshair::after { top: 50%; left: 0; height: 1.5px; width: 100%; transform: translateY(-50%); }
+#pov-banner {
+  position: absolute; left: 50%; bottom: 42px; transform: translateX(-50%);
+  background: rgba(18, 22, 28, 0.72); color: #f4f7fa;
+  border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 12px;
+  padding: 10px 18px; text-align: center; backdrop-filter: blur(8px);
+  display: flex; flex-direction: column; gap: 2px;
+  transition: opacity 0.8s ease; opacity: 1;
+}
+#pov-banner.fade { opacity: 0; }
+#pov-banner strong { font-size: 14px; font-weight: 650; }
+#pov-banner span { font-size: 12px; color: rgba(244, 247, 250, 0.78); }
+
 .toggle-list { display: flex; flex-direction: column; gap: 5px; }
 .toggle-row {
   display: flex; align-items: center; gap: 9px;

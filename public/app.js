@@ -125,6 +125,7 @@
     setupLayerToggles(viewer);
     setupVegetation(viewer);
     setupPicking(viewer, scene);
+    setupPOV(viewer, scene);
     window.__twin.applyLayerViews = applyLayerViews;
     window.__twin.annotations = window.VEILAnnotations?.create(viewer, scene);
     window.__twin.chat = window.VEILChat?.create(viewer, scene);
@@ -853,6 +854,43 @@
        </div>`).join('') + speciesHtml;
   }
 
+  /* ---------------- first-person POV explorer ---------------- */
+
+  async function setupPOV(viewer, scene) {
+    const btn = document.getElementById('pov-toggle');
+    if (!btn || !window.VEILPOV) return;
+
+    const pov = window.VEILPOV.create(viewer, scene, {
+      apron: state.apron,
+      apronGrid: state.apron?.grid || null,
+      surroundingVeg: state.surroundingVegetation,
+      onStateChange: (label) => {
+        btn.textContent = label;
+        btn.classList.toggle('active', pov.active || pov.placing);
+      },
+    });
+    window.__twin.pov = pov;
+
+    // building footprints become walls you can't walk through
+    try {
+      const footprints = viewer.overlayData?.buildings?.features?.length
+        ? viewer.overlayData.buildings
+        : await fetchJson('/data/buildings/footprints.geojson');
+      pov.setFootprints(footprints);
+    } catch (_e) { /* no buildings — open ground */ }
+
+    // real animated water (streams + pond + ponded cells) for the walk
+    try {
+      const [features, ponding] = await Promise.all([
+        fetchJson('/data/hydrology/features.geojson').catch(() => null),
+        fetchJson('/data/hydrology/local/ponding.grid.json').catch(() => null),
+      ]);
+      if (features || ponding) pov.setWaterSources({ features, ponding });
+    } catch (_e) { /* no hydrology built — walk stays dry */ }
+
+    btn.addEventListener('click', () => pov.enterPlacement());
+  }
+
   /* ---------------- picking: GPS readout + identify ---------------- */
 
   function setupPicking(viewer, scene) {
@@ -916,8 +954,10 @@
       const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
       downAt = null;
       // while the chat panel is drawing a region / picking a point, those
-      // clicks belong to it (chat.js), not the GPS readout
+      // clicks belong to it (chat.js), not the GPS readout; same for the POV
+      // explorer's drop-in click / locked first-person session
       if (window.__twin?.chat?.state?.mode) return;
+      if (window.__twin?.pov?.isBusy?.()) return;
       if (moved < 5) pick(e.clientX, e.clientY);
     });
 
