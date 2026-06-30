@@ -1,0 +1,10 @@
+{
+  "analysis_crs": "EPSG:32613",
+  "geographic_crs": "EPSG:4326",
+  "origin_utm": [
+    476000.0,
+    4428000.0
+  ],
+  "proj4": "+proj=utm +zone=13 +datum=WGS84 +units=m +no_defs",
+  "note": "synthetic test fixture \u2014 see scripts/build_test_fixture.py"
+}

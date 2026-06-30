@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VEIL — new twin</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="/init.css" />
+</head>
+<body>
+  <!-- Full-bleed locator map. #map is what /init.js binds Leaflet to. -->
+  <main id="map"></main>
+
+  <!-- On-map hint, dismissed by init-shell.js once the first point lands. -->
+  <div id="map-hint" class="map-hint">
+    <span class="map-hint-dot"></span>
+    <span>Click the map to drop points and outline your area</span>
+  </div>
+
+  <!-- Setup console. Every id below is consumed by /init.js unchanged. -->
+  <aside class="console" role="region" aria-label="New twin setup">
+    <header class="console-head">
+      <div class="brand">
+        <span class="brand-mark">VEIL</span>
+        <span class="brand-sub">Create a new twin</span>
+      </div>
+    </header>
+
+    <!-- Progress rail. init-shell.js sets is-active / is-done. -->
+    <ol class="stepper" id="stepper">
+      <li class="step is-active" data-step="locate">
+        <span class="step-dot">1</span>
+        <span class="step-text"><b>Outline</b><small>Draw the area of interest</small></span>
+      </li>
+      <li class="step" data-step="layers">
+        <span class="step-dot">2</span>
+        <span class="step-text"><b>Layers</b><small>Pick optional national data</small></span>
+      </li>
+      <li class="step" data-step="build">
+        <span class="step-dot">3</span>
+        <span class="step-text"><b>Build</b><small>Fetch &amp; assemble the twin</small></span>
+      </li>
+    </ol>
+
+    <div class="console-scroll">
+      <!-- Step 1 -->
+      <section class="card" data-panel="locate">
+        <form id="address-search-form" class="address-search" role="search">
+          <label class="field" for="address-search">
+            <span>Find address</span>
+            <div class="search-row">
+              <input id="address-search" type="search" placeholder="Street address, city, state" autocomplete="street-address" />
+              <button id="address-search-submit" type="submit" class="ghost">Search</button>
+            </div>
+          </label>
+          <div id="address-search-results" class="address-results" hidden></div>
+        </form>
+
+        <label class="field">
+          <span>Twin name</span>
+          <input id="twin-name" type="text" value="My VEIL twin" maxlength="120" autocomplete="off" />
+        </label>
+
+        <div class="readout">
+          <div class="readout-cell">
+            <span class="readout-k">Points</span>
+            <span class="readout-v" id="point-count">0 points</span>
+          </div>
+          <div class="readout-cell">
+            <span class="readout-k">Area</span>
+            <span class="readout-v" id="area-label">Draw at least 3 points</span>
+          </div>
+        </div>
+
+        <div class="draw-actions">
+          <button id="undo-point" type="button" class="ghost" disabled>Undo</button>
+          <button id="clear-aoi" type="button" class="ghost" disabled>Clear</button>
+          <button id="set-aoi" type="button" class="primary" disabled>Set area &amp; scan layers</button>
+        </div>
+      </section>
+
+      <!-- Step 2 live feed: each national layer as the probe resolves it.
+           Populated by init-shell.js from veil-scan CustomEvents. -->
+      <section class="card scan-card" data-panel="scan" hidden>
+        <div class="scan-head">
+          <span class="scan-title">Checking national layers</span>
+          <span class="scan-count"><span id="scan-done">0</span>/<span id="scan-total">0</span></span>
+        </div>
+        <div class="scan-bar"><div id="scan-bar-fill" class="scan-bar-fill"></div></div>
+        <ul id="scan-feed" class="scan-feed"></ul>
+        <p id="scan-summary" class="scan-summary"></p>
+      </section>
+
+      <!-- Step 3 manifest: always-fetched sources, ticked off as the log advances. -->
+      <section class="card manifest" data-panel="build">
+        <div class="manifest-head">
+          <span class="manifest-title">Build manifest</span>
+          <span class="status-pill" id="status-pill">
+            <span class="status-dot"></span>
+            <span id="status-label">Idle</span>
+            <span id="build-elapsed" class="build-elapsed"></span>
+          </span>
+        </div>
+
+        <p id="build-current" class="build-current" hidden></p>
+
+        <ul class="manifest-list" id="manifest-list">
+          <li data-match="3dep elevation|elevation">3DEP elevation</li>
+          <li data-match="lidar|lpc">3DEP LiDAR (LPC)</li>
+          <li data-match="naip|imagery">NAIP imagery</li>
+          <li data-match="evt">LANDFIRE EVT</li>
+          <li data-match="forest|fire|landfire">LANDFIRE forest / fire</li>
+          <li data-match="ssurgo|soil">gSSURGO soils</li>
+          <li data-match="daymet|climate">Daymet climate</li>
+          <li data-match="vegetation|tree|canopy">National vegetation</li>
+          <li data-match="optional|atlas|national layer">Selected optional layers</li>
+        </ul>
+
+        <pre id="log" class="log" aria-live="polite"></pre>
+
+        <a id="viewer-link" class="open-viewer" href="/" hidden>
+          Open the twin viewer →
+        </a>
+      </section>
+    </div>
+
+    <footer class="console-foot">
+      <span>Sources fetched live from USGS · USDA · USFS · NASA Daymet</span>
+    </footer>
+  </aside>
+
+  <!-- Optional-layer chooser. Restyled only; ids match /init.js. -->
+  <dialog id="layer-dialog" class="layer-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <p class="dialog-eyebrow">Step 2 · Optional national layers</p>
+          <h2>Choose layers</h2>
+        </div>
+        <button id="close-layer-dialog" class="icon-button" type="button" aria-label="Close">×</button>
+      </header>
+      <p id="layer-dialog-summary" class="dialog-intro"></p>
+      <div class="dialog-actions">
+        <button id="select-all-layers" type="button" class="ghost">Select all</button>
+        <button id="select-no-layers" type="button" class="ghost">Select none</button>
+      </div>
+      <div id="layer-list" class="layer-list"></div>
+      <footer class="dialog-footer">
+        <button id="build-without-layers" type="button" class="ghost">Base twin only</button>
+        <button id="build-with-layers" type="button" class="primary">Build selected</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <!-- Unchanged engine: all map drawing + build orchestration. -->
+  <script src="/init.js"></script>
+  <!-- Presentation-only enhancement: drives stepper + manifest from existing DOM. -->
+  <script src="/init-shell.js"></script>
+</body>
+</html>

@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VEIL — digital twin</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <!-- VEIL viewer. The 3D engine, data, and feature modules are shared
+       absolute-path assets; this shell + shell.css/shell.js own the chrome. -->
+  <link rel="stylesheet" href="/shell.css" />
+</head>
+<body>
+  <!-- the 3D scene fills the whole viewport; all chrome floats over it -->
+  <div id="viewer-root"></div>
+
+  <div id="loading" class="loading">
+    <div class="spinner"></div>
+    <p id="loading-text">Loading terrain, imagery &amp; 27k trees…</p>
+  </div>
+
+  <!-- ============================ LEFT ICON RAIL ============================ -->
+  <nav class="rail" id="rail" aria-label="Workspaces">
+    <div class="rail-brand" title="VEIL — digital twin">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M3 7l9 13L21 7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M6.5 7h11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    </div>
+
+    <button class="rail-btn" data-mode="layers" title="Layers">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 12l9 5 9-5"/><path d="M3 16l9 5 9-5"/></svg>
+      <span>Layers</span>
+    </button>
+    <button class="rail-btn" data-mode="explore" title="Explore">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5 5-2z"/></svg>
+      <span>Explore</span>
+    </button>
+    <button class="rail-btn" data-mode="simulate" title="Simulate water">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3s6 6.5 6 10.5A6 6 0 016 13.5C6 9.5 12 3 12 3z"/><path d="M9.5 14a2.5 2.5 0 002.5 2.5"/></svg>
+      <span>Simulate</span>
+    </button>
+    <button class="rail-btn" data-mode="survey" title="Field surveys">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1"/><path d="M8.5 10h7M8.5 14h7M8.5 18h4"/></svg>
+      <span>Survey</span>
+    </button>
+    <button class="rail-btn" data-mode="telemetry" title="Live telemetry">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M7.5 7.5a6 6 0 000 9M16.5 7.5a6 6 0 010 9M4.7 4.7a10 10 0 000 14.6M19.3 4.7a10 10 0 010 14.6"/></svg>
+      <span>Telemetry</span>
+    </button>
+
+    <div class="rail-spacer"></div>
+
+    <button class="rail-btn rail-ask" data-mode="ask" title="Ask G.A.I.A.">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8L18 15z"/></svg>
+      <span>Ask</span>
+    </button>
+    <button class="rail-btn rail-help" id="help-btn" title="Keyboard &amp; tips">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.5a2.4 2.4 0 114.2 1.6c-.8.8-1.8 1.1-1.8 2.3M12 16.4h.01"/></svg>
+      <span>Help</span>
+    </button>
+  </nav>
+
+  <!-- ============================ FLYOUT PANEL ============================ -->
+  <!-- one panel, swapped by the rail; each <section.pane> is a mode -->
+  <aside class="flyout" id="flyout" hidden>
+    <header class="flyout-head">
+      <h2 id="flyout-title">Layers</h2>
+      <button class="icon-x" id="flyout-close" aria-label="Close panel">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="flyout-body">
+
+      <!-- ---------- LAYERS ---------- -->
+      <section class="pane" data-pane="layers">
+        <div class="group">
+          <p class="group-label">Terrain surface</p>
+          <div class="btn-grid" id="terrain-modes">
+            <button data-mode="ortho" class="active">Aerial</button>
+            <button data-mode="false_color">False color</button>
+            <button data-mode="hillshade">Hillshade</button>
+            <button data-mode="elevation">Elevation</button>
+          </div>
+          <button class="wide-btn reset-btn" id="reset-view" title="Frame the whole parcel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Reset view
+          </button>
+        </div>
+        <div class="group">
+          <p class="group-label">Scene</p>
+          <div id="layer-toggles" class="toggle-list"></div>
+        </div>
+
+        <div class="group">
+          <div class="group-label-row">
+            <p class="group-label">Atlas</p>
+            <input id="atlas-search" class="mini-search" type="search" placeholder="Filter…" aria-label="Filter atlas layers" />
+          </div>
+          <div id="atlas-toggles" class="toggle-list atlas-toggle-list"></div>
+        </div>
+
+        <div class="group" id="survey-group" hidden>
+          <p class="group-label">Field surveys</p>
+          <div id="survey-toggles" class="toggle-list"></div>
+        </div>
+      </section>
+
+      <!-- ---------- EXPLORE ---------- -->
+      <section class="pane" data-pane="explore">
+        <div class="group">
+          <p class="group-label">Walk the land</p>
+          <button type="button" id="pov-toggle" class="wide-btn" title="Drop onto any spot and walk the land in first person">Walk the land (POV)</button>
+          <p class="hint" id="pov-hint">Then click anywhere on the terrain to drop in. WASD to move, mouse to look, Shift to run, Esc to exit.</p>
+        </div>
+        <div class="group">
+          <p class="group-label">Vegetation</p>
+          <div id="veg-summary" class="veg-summary"></div>
+          <div class="seg" id="veg-type-filter">
+            <button data-vt="all" class="active">All</button>
+            <button data-vt="evergreen">Evergreen</button>
+            <button data-vt="deciduous">Deciduous</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- SIMULATE ---------- -->
+      <section class="pane" data-pane="simulate" id="simulation-panel">
+        <div class="group">
+          <p class="group-label">Terrain hydrology</p>
+          <div id="sim-hydro-toggles" class="toggle-list">
+            <p class="hint">Run <code>npm run analyze-hydrology</code> to build the terrain hydrology layers.</p>
+          </div>
+        </div>
+
+        <div class="group">
+          <p class="group-label">Water scenario</p>
+          <div class="seg" id="sim-mode">
+            <button type="button" data-mode="snowmelt" class="active">Snowmelt</button>
+            <button type="button" data-mode="rain">Rainstorm</button>
+          </div>
+          <div class="preset-list" id="sim-presets"></div>
+          <form id="sim-form" class="sim-form">
+            <div id="sim-snow-fields">
+              <div class="sim-field-row">
+                <label>Snowpack <input id="sim-swe" type="number" min="0" max="40" step="any" value="7" /> ″ SWE</label>
+                <label>Melt over <input id="sim-days" type="number" min="1" max="30" step="1" value="4" /> days</label>
+              </div>
+              <div class="sim-field-row">
+                <label>Rain on snow <input id="sim-rain" type="number" min="0" max="10" step="any" value="0" /> ″</label>
+              </div>
+            </div>
+            <div id="sim-rain-fields" hidden>
+              <div class="sim-field-row">
+                <label>Rainfall <input id="sim-storm-in" type="number" min="0" max="15" step="any" value="2" /> ″</label>
+                <label>over <input id="sim-storm-hours" type="number" min="1" max="240" step="1" value="12" /> hours</label>
+              </div>
+            </div>
+            <div class="sim-field-row">
+              <label>Soil <select id="sim-antecedent">
+                <option value="dry">dry</option>
+                <option value="normal" selected>normal</option>
+                <option value="wet">wet</option>
+              </select></label>
+              <label class="sim-frozen"><input id="sim-frozen" type="checkbox" /> ground frozen</label>
+            </div>
+            <button id="sim-run" type="submit" class="primary-btn">Run scenario</button>
+          </form>
+          <p id="sim-status" class="sim-status"></p>
+        </div>
+
+        <div class="group" id="sim-scenario-group" hidden>
+          <p class="group-label">Scenario layers</p>
+          <div id="sim-scenario-toggles" class="toggle-list"></div>
+          <div id="sim-results" class="sim-results"></div>
+        </div>
+      </section>
+
+      <!-- ---------- SURVEY ---------- -->
+      <section class="pane" data-pane="survey" id="survey-panel">
+        <div class="group">
+          <p class="hint">Take the QField package to the field, then upload the zipped project folder back here to fold it into the twin.</p>
+          <a id="survey-package-link" class="wide-btn link-btn" href="/data/surveys/package/survey-package.zip" download>Download QField package ↓</a>
+          <form id="survey-form" class="survey-form">
+            <input id="survey-name" type="text" placeholder="Outing name (optional)" autocomplete="off" />
+            <input id="survey-file" type="file" accept=".zip,application/zip" />
+            <button id="survey-upload" type="submit" class="primary-btn">Upload survey</button>
+          </form>
+          <p id="survey-status" class="survey-status"></p>
+        </div>
+      </section>
+
+      <!-- ---------- TELEMETRY ---------- -->
+      <section class="pane" data-pane="telemetry">
+        <div class="group">
+          <p class="group-label">Meshtastic / LoRA gateway</p>
+          <form id="live-gateway-form" class="live-form">
+            <label>Gateway name
+              <input id="live-gateway-name" type="text" placeholder="e.g. Cabin base" autocomplete="off" />
+            </label>
+            <div class="sim-field-row">
+              <label class="grow">Connect via
+                <select id="live-gateway-transport">
+                  <option value="bluetooth" selected>Bluetooth</option>
+                  <option value="serial">Serial</option>
+                  <option value="internet">Internet</option>
+                </select>
+              </label>
+              <button type="button" id="live-discover">Scan</button>
+            </div>
+            <select id="live-device-select" hidden></select>
+            <input id="live-gateway-address" type="text" placeholder="Bluetooth address, serial port, host, or URL" autocomplete="off" />
+            <button type="submit" class="primary-btn">Register &amp; connect</button>
+          </form>
+          <p id="live-discover-status" class="live-status"></p>
+        </div>
+
+        <div class="group">
+          <p class="group-label">Devices</p>
+          <p id="live-status" class="live-status">Waiting for live telemetry.</p>
+          <div id="live-gateways" class="live-gateway-list"></div>
+          <div id="live-access" class="live-access" hidden>
+            <span id="live-access-status" class="live-status"></span>
+            <button type="button" id="live-access-token" class="live-access-token"></button>
+          </div>
+        </div>
+
+        <div class="group">
+          <button type="button" id="live-replay-toggle" class="wide-btn" aria-label="Open telemetry replay controls">Telemetry replay…</button>
+        </div>
+      </section>
+
+    </div>
+  </aside>
+
+  <!-- ============================ TOP BRAND + SURFACE ============================ -->
+  <header class="brand" id="brand">
+    <span class="brand-mark">VEIL</span>
+    <span class="brand-sep"></span>
+    <span class="brand-title">
+      <strong id="twin-title">Digital Twin</strong>
+      <em class="brand-sub" id="twin-subtitle" hidden></em>
+    </span>
+  </header>
+
+  <!-- ============================ RIGHT INSPECTOR ============================ -->
+  <aside class="inspector" id="inspector" hidden>
+    <header class="inspector-head">
+      <span class="inspector-eyebrow">Inspect</span>
+      <button class="icon-x" id="inspector-close" aria-label="Close inspector">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="inspector-body">
+      <div class="group">
+        <p class="group-label">Coordinates</p>
+        <p class="hint" id="readout-hint">Click the terrain to read coordinates.</p>
+        <dl class="readout-grid" id="readout-grid" hidden>
+          <dt>Lat / Lon</dt><dd id="r-latlon">—</dd>
+          <dt>Elev</dt><dd id="r-elev">—</dd>
+          <dt>UTM 18N</dt><dd id="r-utm">—</dd>
+        </dl>
+        <div class="readout-actions" id="readout-actions" hidden>
+          <a id="gmaps-link" href="#" target="_blank" rel="noopener">Google Maps ↗</a>
+          <button id="copy-coord" type="button" data-coord="">Copy</button>
+        </div>
+      </div>
+      <div class="group" id="legend-group">
+        <p class="group-label">Map key</p>
+        <p class="hint" id="key-empty">Enable atlas layers, then click the terrain to inspect features.</p>
+        <div id="key-list" class="atlas-list"></div>
+      </div>
+      <div class="group">
+        <p class="group-label">Feature info</p>
+        <div id="identify-results">
+          <p class="hint">Click anywhere on the terrain to identify the features there.</p>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============================ RIGHT CHAT DOCK ============================ -->
+  <aside class="chat-dock" id="chat-panel" hidden>
+    <header class="chat-head">
+      <span class="chat-title">Ask <strong>G.A.I.A.</strong></span>
+      <button class="icon-x" id="chat-close" aria-label="Close chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="chat-scope" id="chat-scope">Scope: the whole land</p>
+    <div class="chat-tools">
+      <button id="chat-draw" type="button" title="Draw a polygon on the terrain (3+ points) to scope questions">Draw region</button>
+      <button id="chat-pick" type="button" title="Pick a point; questions load ~100 m of context around it">Pick point</button>
+      <button id="chat-clear" type="button" disabled>Clear</button>
+      <button id="chat-clear-drawings" type="button" title="Remove the orange shapes the assistant drew on the map" disabled>Clear drawings</button>
+      <button id="chat-key" type="button" title="Set your own OpenAI API key (stored only in this browser)">Key</button>
+    </div>
+    <div id="chat-messages" class="chat-messages">
+      <div class="chat-msg note">Ask anything about the land — or draw a region / pick a point first to focus the question.</div>
+    </div>
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" rows="2" placeholder="Ask G.A.I.A. about the land…"></textarea>
+      <button id="chat-send" type="submit">Send</button>
+    </form>
+  </aside>
+
+  <!-- live telemetry replay scrubber (live-inputs.js shows this) -->
+  <div id="live-replay-bar" hidden>
+    <div class="live-replay-row">
+      <button type="button" id="live-replay-play" aria-label="Play telemetry replay" disabled>Play</button>
+      <select id="live-replay-day" aria-label="Replay day"></select>
+      <select id="live-replay-speed" title="Replay playback speed" aria-label="Replay playback speed">
+        <option value="1">1x realtime</option>
+        <option value="10">10x</option>
+        <option value="60">60x</option>
+        <option value="600" selected>600x</option>
+      </select>
+      <input id="live-replay-progress" type="range" min="0" max="0" value="0" aria-label="Replay progress" disabled />
+      <button type="button" id="live-replay-export" aria-label="Append replay telemetry to twin store" disabled>Append to twin store</button>
+    </div>
+    <div class="live-replay-row live-replay-options">
+      <label title="When appending, export only the current replay timestamp instead of the full selected day">
+        <input type="checkbox" id="live-replay-snapshot" aria-label="Export current replay timestamp only" disabled /> export current only
+      </label>
+      <button type="button" id="live-replay-pov" title="Follow the tracker from its replayed point of view" aria-label="Follow tracker point of view during replay" disabled>Tracker POV</button>
+      <span id="live-replay-status">No replay loaded.</span>
+    </div>
+  </div>
+
+  <!-- ============================ HELP OVERLAY ============================ -->
+  <div class="help-sheet" id="help-sheet" hidden>
+    <div class="help-card">
+      <header class="help-head"><h2>Tips &amp; shortcuts</h2><button class="icon-x" id="help-close" aria-label="Close help"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+      <div class="help-grid">
+        <kbd>Drag</kbd><span>Orbit the camera</span>
+        <kbd>Scroll</kbd><span>Zoom</span>
+        <kbd>Right-drag</kbd><span>Pan</span>
+        <kbd>Click terrain</kbd><span>Identify features &amp; read coordinates</span>
+        <kbd>B</kbd><span>Building placement editor</span>
+        <kbd>Esc</kbd><span>Exit POV / building editor</span>
+      </div>
+      <p class="help-foot">Pick a workspace from the rail on the left.</p>
+    </div>
+  </div>
+
+  <!-- three.js + controls + proj4 (georef.js builds its transform from it) -->
+  <script src="/vendor/three.min.js"></script>
+  <script src="/vendor/OrbitControls.js"></script>
+  <script src="/vendor/TransformControls.js"></script>
+  <script src="/vendor/proj4.js"></script>
+  <!-- ported viewer modules (shared engine) -->
+  <script src="/viewer/camera.js"></script>
+  <script src="/viewer/terrain.js"></script>
+  <script src="/viewer/vegetation.js"></script>
+  <script src="/viewer/overlays.js"></script>
+  <script src="/viewer/buildings3d.js"></script>
+  <script src="/viewer/building-editor.js"></script>
+  <script src="/viewer/georef.js"></script>
+  <script src="/viewer/pov.js"></script>
+  <script src="/viewer/scene.js"></script>
+  <!-- feature modules (shared) -->
+  <script src="/annotations.js"></script>
+  <script src="/chat.js"></script>
+  <script src="/survey.js"></script>
+  <script src="/simulation.js"></script>
+  <script src="/live-inputs.js"></script>
+  <!-- boot (shared) -->
+  <script src="/app.js"></script>
+  <!-- viewer chrome -->
+  <script src="/shell.js"></script>
+</body>
+</html>

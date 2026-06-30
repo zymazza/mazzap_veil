@@ -1,0 +1,15 @@
+{
+  "name": "us-national",
+  "title": "US national datasets (LANDFIRE) — vegetation typing anywhere in CONUS",
+  "description": "A region-agnostic pack for the continental US. It does not encode one place's botany; it uses LANDFIRE 2024 EVT (a national 30 m product) to type trees evergreen/deciduous and name their community, so any CONUS twin gets typed vegetation without a hand-built regional pack. Fetch the data with fetch_landfire.py, then build vegetation with TWIN_PACK=us-national.",
+  "coverage": "Continental US (CONUS)",
+  "hooks": {
+    "vegetation": "vegetation.py"
+  },
+  "fetch_scripts": [
+    "fetch_landfire.py"
+  ],
+  "bundled": {
+    "landfire_evt_vat.json": "National LANDFIRE 2024 EVT value->name+physiognomy table (CONUS, public domain)"
+  }
+}

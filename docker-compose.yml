@@ -1,0 +1,68 @@
+# VEIL in a container. `docker compose up` builds the image (Node + GDAL +
+# numpy + pyproj + Pillow + mcp + live Meshtastic bridge deps, all pinned) and
+# serves the viewer; the same image runs every pipeline step via
+# `docker compose run`.
+#
+#   docker compose up --build                      # serve ./data at :4173
+#   docker compose --profile live-hardware up veil-live --build
+#                                                   # serve with BLE/USB access
+#   docker compose run --rm veil npm run demo      # build the Flatirons demo twin
+#   TWIN_DATA_DIR=/app/twins/demo/data docker compose up   # serve the demo twin
+#
+# ./data and ./twins are bind-mounted, so twins built inside the container
+# persist to the host (and stay private/gitignored).
+x-veil-base: &veil-base
+  build:
+    context: .
+    args:
+      GDAL_VERSION: "3.9.3"
+      NODE_MAJOR: "20"
+  image: veil:latest
+  environment: &veil-environment
+    HOST: "0.0.0.0"
+    PORT: "4173"
+    # Which twin to serve / operate on. Point at /app/twins/<name>/data for
+    # an alternate twin.
+    TWIN_DATA_DIR: "${TWIN_DATA_DIR:-/app/data}"
+    # Meshtastic/LoRA live bridge deps are installed into this image venv.
+    VEIL_LIVE_PYTHON: "${VEIL_LIVE_PYTHON:-/opt/veil-live/bin/python}"
+    VEIL_LIVE_TOKEN: "${VEIL_LIVE_TOKEN:-}"
+    # "Ask the land" chat panel (optional). Set OPENAI_API_KEY in your shell
+    # or a .env file, or mount a .openai_key file (below).
+    OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
+    OPENAI_REASONING_EFFORT: "${OPENAI_REASONING_EFFORT:-low}"
+  volumes: &veil-volumes
+    # Twin data lives on the host (private/gitignored) and is built/served here.
+    - ./data:/app/data
+    - ./twins:/app/twins
+    # Optional: provide the chat/live keys as files instead of env vars.
+    # - ./.openai_key:/app/.openai_key:ro
+    # - ./.live_token:/app/.live_token:ro
+
+services:
+  veil:
+    <<: *veil-base
+    ports:
+      - "4173:4173"
+  veil-live:
+    <<: *veil-base
+    profiles: ["live-hardware"]
+    ports:
+      - "4173:4173"
+    environment:
+      <<: *veil-environment
+      # Let Bleak talk to the host BlueZ service through the mounted system bus.
+      DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/var/run/dbus/system_bus_socket"
+    volumes:
+      - ./data:/app/data
+      - ./twins:/app/twins
+      # Host BlueZ D-Bus for Bluetooth Meshtastic gateways.
+      - /var/run/dbus:/var/run/dbus
+      # Host device tree for USB serial gateways such as /dev/ttyUSB0,
+      # /dev/ttyACM0, and USB Bluetooth adapters.
+      - /dev:/dev
+      # Optional: provide the chat/live keys as files instead of env vars.
+      # - ./.openai_key:/app/.openai_key:ro
+      # - ./.live_token:/app/.live_token:ro
+    privileged: true

@@ -1,0 +1,40 @@
+{
+  "name": "mazzap",
+  "version": "2.0.0",
+  "description": "Mazzap v2 — a standalone, region-agnostic georeferenced 3D digital-twin engine.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "init": "node scripts/init.js",
+    "start": "node server.js",
+    "start:local": "scripts/start-local-integrated.sh",
+    "start:local:server": "CHAT_PROVIDER=ollama OLLAMA_HOST=http://127.0.0.1:11434 OLLAMA_MODEL=qwen3.6-27b-ud-q4-k-xl-no-mmproj OLLAMA_NUM_CTX=90800 VEIL_OPEN_BROWSER=0 scripts/start-local-integrated.sh",
+    "add-layer": "python3 scripts/add_layer.py",
+    "ingest-dem": "python3 scripts/ingest_dem.py",
+    "ingest-imagery": "python3 scripts/ingest_imagery.py",
+    "build-from-aoi": "python3 scripts/build_from_aoi.py",
+    "fetch-landfire": "python3 packs/us-national/fetch_landfire.py",
+    "fetch-forest-ecology": "python3 scripts/fetch_forest_ecology.py",
+    "fetch-gssurgo": "python3 scripts/fetch_gssurgo.py",
+    "fetch-climate-forcing": "python3 packs/us-national/fetch_climate_forcing.py",
+    "fetch-national-layers": "python3 scripts/fetch_national_layers.py",
+    "ingest-manual-layers": "python3 scripts/ingest_manual_layers.py",
+    "demo": "python3 scripts/build_from_aoi.py --aoi packs/us-national/demo/flatirons_aoi.shp --data-dir twins/demo/data --name 'Flatirons demo' --force",
+    "serve-demo": "TWIN_DATA_DIR=twins/demo/data PORT=4174 node server.js",
+    "build-vegetation": "python3 scripts/analyze_vegetation.py && python3 scripts/build_surrounding_vegetation.py",
+    "build-survey-package": "python3 scripts/build_survey_package.py",
+    "analyze-hydrology": "python3 scripts/analyze_hydrology.py",
+    "hydro-scenario": "python3 scripts/hydro_scenario.py",
+    "migrate": "python3 scripts/migrate_to_store.py",
+    "export": "python3 scripts/export_viewer_payloads.py",
+    "rebuild-store": "python3 scripts/rebuild_store.py",
+    "canopy-history": "python3 scripts/canopy_density.py",
+    "build-test-fixture": "python3 scripts/build_test_fixture.py",
+    "test": "python3 scripts/twin_query_test.py",
+    "test:demo": "TWIN_DATA_DIR=twins/demo/data python3 scripts/twin_query_test.py"
+  },
+  "author": "Zy Mazza",
+  "license": "MIT"
+}
